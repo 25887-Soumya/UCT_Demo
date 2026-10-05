@@ -1,0 +1,55 @@
+resources:
+  jobs:
+    load_pipeline_table_config:
+      name: Load_pipeline_table_config_${bundle.target}
+      queue:
+        enabled: true
+      parameters:
+        - name: bronze_schema
+          default: sap_demo_bronze
+        - name: gold_schema
+          default: sap_demo_gold
+        - name: gold_view
+          default: gold_view
+        - name: is_active
+          default: "true"
+        - name: load_type
+          default: full
+        - name: pipeline_name
+          default: ${var.pipeline_id}
+        - name: silver_schema
+          default: sap_demo_silver
+        - name: silver_table
+          default: mara
+        - name: soft_delete_condition
+          default: ""
+        - name: source_path
+          default: MARA/delta/,/MARA/initial/
+        - name: table_name
+          default: MARA
+      tasks:
+        - task_key: Load_pipeline_table_config
+          notebook_task:
+            notebook_path: ../src/control/load_pipeline_table_config.sql
+
+    config_file_generator:
+      name: Config_file_generator_${bundle.target}
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+      parameters:
+        - name: environment
+          default: ${var.environment}
+        - name: pipeline_name
+          default: ${var.pipeline_id}
+      environments:
+        - environment_key: create_config_file_environment
+          spec:
+            environment_version: "5"
+            dependencies:
+              - openpyxl==3.1.5
+      tasks:
+        - task_key: create_config_file
+          notebook_task:
+            notebook_path: ../src/config_generation/metadataloader_updated.py
+          environment_key: create_config_file_environment

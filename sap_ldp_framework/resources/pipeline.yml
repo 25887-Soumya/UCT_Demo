@@ -1,0 +1,16 @@
+resources:
+  pipelines:
+    sap_lakeflow_pipeline:
+      name: LakeFlow Pipeline Framework (${bundle.target})
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      photon: true
+      root_path: ../src/pipeline
+      configuration:
+        pipeline_id: ${var.pipeline_id}
+        environment: ${var.environment}
+        config_out_dir: ${var.config_out_dir}
+      libraries:
+        - notebook:
+            path: ../src/pipeline/sap_lakeflow_pipeline.py
