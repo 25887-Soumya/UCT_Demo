@@ -1,0 +1,49 @@
+resources:
+  jobs:
+    data_load_source_to_gold:
+      name: DATA_LOAD_SOURCE_TO_GOLD_${bundle.target}
+      queue:
+        enabled: true
+      performance_target: PERFORMANCE_OPTIMIZED
+      parameters:
+        - name: config_out_dir
+          default: ${var.config_out_dir}
+        - name: dlt_pipeline_uuid
+          default: ${resources.pipelines.sap_lakeflow_pipeline.id}
+        - name: environment
+          default: ${var.environment}
+        - name: pipeline_id
+          default: ${var.pipeline_id}
+      environments:
+        - environment_key: Silver_to_gold_environment
+          spec:
+            environment_version: "6"
+      tasks:
+        - task_key: Configure_pipeline
+          notebook_task:
+            notebook_path: ../src/notebooks/configure_pipeline.py
+            base_parameters:
+              dlt_pipeline_uuid: "{{job.parameters.dlt_pipeline_uuid}}"
+              pipeline_id: "{{job.parameters.pipeline_id}}"
+              environment: "{{job.parameters.environment}}"
+              config_out_dir: "{{job.parameters.config_out_dir}}"
+          environment_key: Silver_to_gold_environment
+
+        - task_key: Source_to_silver
+          depends_on:
+            - task_key: Configure_pipeline
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.sap_lakeflow_pipeline.id}
+            full_refresh: false
+
+        - task_key: Silver_to_gold
+          depends_on:
+            - task_key: Source_to_silver
+          notebook_task:
+            notebook_path: ../src/notebooks/gold_pipeline.py
+            base_parameters:
+              dlt_pipeline_uuid: "{{job.parameters.dlt_pipeline_uuid}}"
+              pipeline_id: "{{job.parameters.pipeline_id}}"
+              environment: "{{job.parameters.environment}}"
+              config_out_dir: "{{job.parameters.config_out_dir}}"
+          environment_key: Silver_to_gold_environment

@@ -1,0 +1,41 @@
+bundle:
+  name: sap_ldp_framework
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Catalog holding the control schema and pipeline output
+    default: rgaplxdatabricks
+  schema:
+    description: Default schema of the Lakeflow pipeline
+    default: sap_demo_bronze
+  pipeline_id:
+    description: pipeline_name registered in pipeline_table_config
+    default: uct_test_bundle
+  environment:
+    description: dev | qa | prod (read by the pipeline and the notebooks)
+    default: dev
+  config_out_dir:
+    description: Where configure_pipeline writes config JSON and the pipeline reads it
+    default: /Volumes/rgaplxdatabricks/uct_demo/landing/configs
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-7405615385053650.10.azuredatabricks.net
+
+  # Add when you are ready for prod, with its own catalog/volumes and a service principal:
+  # prod:
+  #   mode: production
+  #   workspace:
+  #     host: https://adb-7405615385053650.10.azuredatabricks.net
+  #     root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+  #   variables:
+  #     environment: prod
+  #     catalog: <prod_catalog>
+  #   run_as:
+  #     service_principal_name: <application-id>
