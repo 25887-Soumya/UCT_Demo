@@ -54,7 +54,18 @@ targets:
     workspace:
       host: https://adb-7405615385053650.10.azuredatabricks.net
 
-  # Add when you are ready for prod, with its own catalog/volumes and a service principal:
+  # qa:
+  #   mode: production
+  #   workspace:
+  #     host: https://adb-7405615385053650.10.azuredatabricks.net
+  #     # Shared folder so qa is deployed once, not per user
+  #     root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+  #   variables:
+  #     environment: qa
+  #     catalog: <qa_catalog>                      # TODO: replace
+  #     landing_base_path: /Volumes/<qa_catalog>/landing/landing_volume/   # TODO: replace
+  #     # base_volume and config_out_dir derive from catalog + control_schema
+
   # prod:
   #   mode: production
   #   workspace:
@@ -62,6 +73,8 @@ targets:
   #     root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
   #   variables:
   #     environment: prod
-  #     catalog: <prod_catalog>
-  #   run_as:
-  #     service_principal_name: <application-id>
+  #     catalog: <prod_catalog>                    # TODO: replace
+  #     landing_base_path: /Volumes/<prod_catalog>/landing/landing_volume/ # TODO: replace
+  #   # Add later, once the service principal exists:
+  #   # run_as:
+  #   #   service_principal_name: <application-id>
