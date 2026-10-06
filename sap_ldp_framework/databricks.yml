@@ -5,21 +5,47 @@ include:
   - resources/*.yml
 
 variables:
+  # ── Identity: catalog, schemas, pipeline name, environment ────────────
   catalog:
-    description: Catalog holding the control schema and pipeline output
+    description: UC catalog for all output and control tables (used by every notebook)
     default: rgaplxdatabricks
   schema:
-    description: Default schema of the Lakeflow pipeline
+    description: Default schema for the Lakeflow pipeline (bronze target)
     default: sap_demo_bronze
+  control_schema:
+    description: Schema holding pipeline_table_config, sap_metadata_landing, pipeline_alerts
+    default: uct_demo
   pipeline_id:
-    description: pipeline_name registered in pipeline_table_config
+    description: pipeline_name value registered in pipeline_table_config
     default: uct_test_bundle
   environment:
-    description: dev | qa | prod (read by the pipeline and the notebooks)
+    description: dev | qa | prod — read by every notebook and the pipeline
     default: dev
+
+  # ── Paths: three distinct UC Volumes (see README for a mapping table) ─
+  #
+  #  Volume 1 — SAP landing zone       (landing_base_path)
+  #  Volume 2 — Pipeline runtime state  (base_volume)
+  #  Volume 3 — Control / config store  (config_out_dir)
+  #
+  landing_base_path:
+    description: >
+      Volume 1: SAP Datasphere landing zone — raw partfiles and
+      .sap.partfile.metadata. Used only by metadataloader_updated.
+    default: /Volumes/ingestion_test/landing/landing_volume/
+  base_volume:
+    description: >
+      Volume 2: Lakeflow pipeline runtime — Auto Loader schema checkpoints
+      (schema/), run logs (logs/). Used by sap_lakeflow_pipeline,
+      gold_pipeline, configure_pipeline. NOT where config JSON lives.
+    default: /Volumes/${var.catalog}/temp_source/source_files
   config_out_dir:
-    description: Where configure_pipeline writes config JSON and the pipeline reads it
-    default: /Volumes/rgaplxdatabricks/uct_demo/landing/configs
+    description: >
+      Volume 3: Config store — the metadata loader writes pipeline config
+      JSON here; sap_lakeflow_pipeline, gold_pipeline, and
+      configure_pipeline read it. Lives on the control volume
+      ({catalog}.{control_schema}.landing), not on base_volume.
+    default: /Volumes/${var.catalog}/${var.control_schema}/landing/configs
 
 targets:
   dev:

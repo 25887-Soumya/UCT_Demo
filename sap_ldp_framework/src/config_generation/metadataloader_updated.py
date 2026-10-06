@@ -22,13 +22,10 @@ if not logger.handlers:
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(_h)
 
-BASE_VOLUME = "/Volumes/rgaplxdatabricks/uct_demo/landing"
-
-# The Delta table that replaced the Excel template. Written by the
-# config-entry notebook (MERGE INTO ... pipeline_table_config). Kept as a
-# widget so dev/qa/prod can point at different config tables without edits.
-DEFAULT_CONFIG_TABLE = "rgaplxdatabricks.uct_demo.pipeline_table_config"
-CONFIG_DIR  = f"{BASE_VOLUME}/configs"
+# ── Defaults (overridable via widgets) ──────────────────────────
+DEFAULT_CATALOG        = "rgaplxdatabricks"
+DEFAULT_CONTROL_SCHEMA = "uct_demo"
+DEFAULT_LANDING_BASE   = "/Volumes/ingestion_test/landing/landing_volume/"
 
 # FIX (ported from the Excel orchestrator): don't let widget registration
 # itself take the whole notebook down if it's being run somewhere widgets
@@ -37,17 +34,41 @@ CONFIG_DIR  = f"{BASE_VOLUME}/configs"
 try:
     dbutils.widgets.text("environment", "dev", "Environment")
     dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
-    dbutils.widgets.text("config_table", DEFAULT_CONFIG_TABLE, "Config Table (catalog.schema.table)")
-    ENVIRONMENT   = (dbutils.widgets.get("environment") or "dev").strip().lower()
-    PIPELINE_NAME = (dbutils.widgets.get("pipeline_name") or "").strip()
-    CONFIG_TABLE  = (dbutils.widgets.get("config_table") or DEFAULT_CONFIG_TABLE).strip()
+    dbutils.widgets.text("catalog", DEFAULT_CATALOG, "Target Catalog")
+    dbutils.widgets.text("control_schema", DEFAULT_CONTROL_SCHEMA,
+                         "Control Schema (pipeline_table_config lives here)")
+    dbutils.widgets.text("landing_base_path", DEFAULT_LANDING_BASE,
+                         "SAP Landing Base Path")
+    ENVIRONMENT       = (dbutils.widgets.get("environment") or "dev").strip().lower()
+    PIPELINE_NAME     = (dbutils.widgets.get("pipeline_name") or "").strip()
+    CATALOG           = (dbutils.widgets.get("catalog") or DEFAULT_CATALOG).strip()
+    CONTROL_SCHEMA    = (dbutils.widgets.get("control_schema") or DEFAULT_CONTROL_SCHEMA).strip()
+    LANDING_BASE_PATH = (dbutils.widgets.get("landing_base_path") or DEFAULT_LANDING_BASE).strip()
 except Exception:
-    ENVIRONMENT   = "dev"
-    PIPELINE_NAME = ""
-    CONFIG_TABLE  = DEFAULT_CONFIG_TABLE
+    ENVIRONMENT       = "dev"
+    PIPELINE_NAME     = ""
+    CATALOG           = DEFAULT_CATALOG
+    CONTROL_SCHEMA    = DEFAULT_CONTROL_SCHEMA
+    LANDING_BASE_PATH = DEFAULT_LANDING_BASE
+
+# ── Derived constants (no more hardcoded catalog or paths) ──────
+BASE_VOLUME          = f"/Volumes/{CATALOG}/{CONTROL_SCHEMA}/landing"
+DEFAULT_CONFIG_TABLE = f"{CATALOG}.{CONTROL_SCHEMA}.pipeline_table_config"
+CONFIG_TABLE         = DEFAULT_CONFIG_TABLE
+CONFIG_DIR           = f"{BASE_VOLUME}/configs"
+
+# Override the CTRL variable that pipeline_register set as a default during
+# %run — now it uses the widget-resolved catalog and control_schema.
+CTRL = f"{CATALOG}.{CONTROL_SCHEMA}"
+
+# Override the CTRL variable that pipeline_register set with its hardcoded
+# default — from this point forward every SQL referencing {CTRL}.table will
+# use the widget-derived catalog and schema.
+CTRL = f"{CATALOG}.{CONTROL_SCHEMA}"
 
 logger.info(f"Widgets resolved -> environment={ENVIRONMENT!r}  "
-            f"pipeline_name={PIPELINE_NAME!r}  config_table={CONFIG_TABLE!r}")
+            f"pipeline_name={PIPELINE_NAME!r}  catalog={CATALOG!r}  "
+            f"control_schema={CONTROL_SCHEMA!r}  landing_base_path={LANDING_BASE_PATH!r}")
 
 # NOTE: the `%run ./pipeline_registry` / `%run ./read_sap_metadata` lines that
 # used to sit here were removed — %run must be the only thing in its cell,
@@ -80,19 +101,14 @@ if ENVIRONMENT not in ("dev", "qa", "prod"):
 
 if len(CONFIG_TABLE.split(".")) != 3:
     raise ValueError(
-        f"config_table widget must be fully qualified (catalog.schema.table) — got '{CONFIG_TABLE}'"
+        f"Derived CONFIG_TABLE must be fully qualified (catalog.schema.table) — got '{CONFIG_TABLE}'"
     )
 
 # Landing zone for SAP DSP exports. Metadata_path is not a template column —
 # it is always derived from this base + Table_name. Source_path values in
 # the template are relative to this same base (one or more, comma-separated);
 # each is prefixed with LANDING_BASE_PATH before use.
-
-
-
-
-# LANDING_BASE_PATH = "/Volumes/ingestion_test/landing/landing_volume/DEMO/"
-LANDING_BASE_PATH = "/Volumes/ingestion_test/landing/landing_volume/"
+# (LANDING_BASE_PATH is now set from the landing_base_path widget above.)
 
 
 
@@ -660,7 +676,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
             pipeline_id    = pipeline_name,
             pipeline_name  = f"SAP Pipeline — {pipeline_name}",
             environment    = environment,
-            target_catalog = "rgaplxdatabricks",
+            target_catalog = CATALOG,
             bronze_schema  = bronze_schema,
             silver_schema  = silver_schema,
             gold_schema    = gold_schema,
@@ -788,7 +804,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                 silver_full = None
                 if has_dlt_silver:
                     silver_layer = f"{pipeline_name}_{silver_name}_silver"
-                    silver_full  = f"rgaplxdatabricks.{silver_schema}.{silver_layer}"
+                    silver_full  = f"{CATALOG}.{silver_schema}.{silver_layer}"
 
                 # A gold view needs either an explicit SQL file, or can
                 # default to a straight silver passthrough.
@@ -863,7 +879,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                             name            = gold_object,
                             sql             = gold_sql,
                             load_type       = "full",
-                            materialization = "view",
+                            materialization = "materialized_view",
                             join_sources    = join_sources if join_sources else None,
                         )
                         if silver_name and has_dlt_silver:

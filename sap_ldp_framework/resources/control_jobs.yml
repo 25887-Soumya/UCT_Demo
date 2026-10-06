@@ -5,6 +5,10 @@ resources:
       queue:
         enabled: true
       parameters:
+        - name: catalog
+          default: ${var.catalog}
+        - name: control_schema
+          default: ${var.control_schema}
         - name: bronze_schema
           default: sap_demo_bronze
         - name: gold_schema
@@ -27,10 +31,26 @@ resources:
           default: MARA/delta/,/MARA/initial/
         - name: table_name
           default: MARA
+        - default: uct_test_mara.sql
+          name: gold_sql_file
       tasks:
         - task_key: Load_pipeline_table_config
           notebook_task:
             notebook_path: ../src/control/load_pipeline_table_config.sql
+            base_parameters:
+              catalog: "{{job.parameters.catalog}}"
+              control_schema: "{{job.parameters.control_schema}}"
+              pipeline_name: "{{job.parameters.pipeline_name}}"
+              table_name: "{{job.parameters.table_name}}"
+              source_path: "{{job.parameters.source_path}}"
+              bronze_schema: "{{job.parameters.bronze_schema}}"
+              silver_schema: "{{job.parameters.silver_schema}}"
+              gold_schema: "{{job.parameters.gold_schema}}"
+              silver_table: "{{job.parameters.silver_table}}"
+              gold_view: "{{job.parameters.gold_view}}"
+              load_type: "{{job.parameters.load_type}}"
+              soft_delete_condition: "{{job.parameters.soft_delete_condition}}"
+              is_active: "{{job.parameters.is_active}}"
 
     config_file_generator:
       name: Config_file_generator_${bundle.target}
@@ -42,6 +62,12 @@ resources:
           default: ${var.environment}
         - name: pipeline_name
           default: ${var.pipeline_id}
+        - name: catalog
+          default: ${var.catalog}
+        - name: control_schema
+          default: ${var.control_schema}
+        - name: landing_base_path
+          default: ${var.landing_base_path}
       environments:
         - environment_key: create_config_file_environment
           spec:
@@ -52,4 +78,10 @@ resources:
         - task_key: create_config_file
           notebook_task:
             notebook_path: ../src/config_generation/metadataloader_updated.py
+            base_parameters:
+              environment: "{{job.parameters.environment}}"
+              pipeline_name: "{{job.parameters.pipeline_name}}"
+              catalog: "{{job.parameters.catalog}}"
+              control_schema: "{{job.parameters.control_schema}}"
+              landing_base_path: "{{job.parameters.landing_base_path}}"
           environment_key: create_config_file_environment

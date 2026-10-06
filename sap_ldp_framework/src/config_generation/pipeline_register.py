@@ -22,6 +22,8 @@ if not logger.handlers:
     logger.addHandler(_h)
 logger.setLevel(logging.INFO)
 
+# Default control schema — overridden by metadataloader_updated after
+# its catalog / control_schema widgets are resolved.
 CTRL = "rgaplxdatabricks.uct_demo"
 
 # ── The menu of allowed "how does this table refresh" options ───────────────

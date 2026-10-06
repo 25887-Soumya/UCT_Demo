@@ -12,8 +12,9 @@
 #   pipeline_id      REQUIRED  pipeline_name from pipeline_table_config
 #   environment      REQUIRED  dev | qa | prod
 #   ctrl_schema      optional  control-table schema written by the registry
-#                              (default rgaplxdatabricks.uct_demo)
+#                              (now set via pipeline.yml from bundle variables)
 #   base_volume      optional  framework volume holding configs/, schema/, logs/
+#                              (now set via pipeline.yml from bundle variables)
 #   config_out_dir   optional  default {base_volume}/configs
 #   archive_after    optional  cleanSource wait before moving files (default "7 days")
 #
@@ -53,6 +54,8 @@ def _conf(key: str, default: str = "", required: bool = False) -> str:
 
 PIPELINE_ID    = _conf("pipeline_id", required=True)
 ENVIRONMENT    = _conf("environment", required=True).lower()
+# Fallback defaults — normally overridden by pipeline.yml configuration
+# (ctrl_schema and base_volume are set from bundle variables).
 CTRL           = _conf("ctrl_schema", "rgaplxdatabricks.uct_demo")
 BASE_VOLUME    = _conf("base_volume", "/Volumes/rgaplxdatabricks/temp_source/source_files").rstrip("/")
 CONFIG_OUT_DIR = _conf("config_out_dir", f"{BASE_VOLUME}/configs").rstrip("/")
