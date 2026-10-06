@@ -1,0 +1,62 @@
+name: Deploy bundle
+
+on:
+  # Automatic: every merge to main deploys to dev
+  push:
+    branches: [main]
+    paths:
+      - "sap_ldp_framework/**"
+      - ".github/workflows/**"
+
+  # Manual: Actions tab -> "Deploy bundle" -> Run workflow -> pick environment
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to deploy to"
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - qa
+          - prod
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.target || 'dev' }}
+    runs-on: ubuntu-latest
+
+    # Picks the GitHub environment (and its secrets / approval rules) to match
+    environment: ${{ inputs.target || 'dev' }}
+
+    # Never run two deploys to the same environment at once
+    concurrency:
+      group: deploy-${{ inputs.target || 'dev' }}
+      cancel-in-progress: false
+
+    env:
+      TARGET: ${{ inputs.target || 'dev' }}
+      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: sap_ldp_framework
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to a release tag from https://github.com/databricks/setup-cli/releases
+      - uses: databricks/setup-cli@main
+
+      - name: Python syntax check
+        run: python -m compileall -q src
+
+      - name: Validate bundle
+        run: databricks bundle validate -t "$TARGET"
+
+      - name: Deploy bundle
+        run: databricks bundle deploy -t "$TARGET"
