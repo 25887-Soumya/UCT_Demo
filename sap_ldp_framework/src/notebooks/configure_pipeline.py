@@ -34,13 +34,18 @@ dbutils.widgets.text("dlt_pipeline_uuid", "",
     "Databricks pipeline resource id (e.g. c4e23f05-5690-4102-aa60-acde9036d2ad) — NOT the app-level pipeline_id")
 dbutils.widgets.text("pipeline_id", "sap_demo_uct", "App-level pipeline_id")
 dbutils.widgets.text("environment", "dev", "Environment")
-dbutils.widgets.text("config_out_dir",
-    "/Volumes/rgaplxdatabricks/temp_source/source_files/configs", "Config output dir")
+dbutils.widgets.text("config_out_dir", "", "Config output dir (passed from job)")
+dbutils.widgets.text("catalog", "rgaplxdatabricks", "Target Catalog")
+dbutils.widgets.text("control_schema", "uct_demo", "Control Schema")
+dbutils.widgets.text("base_volume", "", "Framework volume path (passed from job)")
 
 dlt_pipeline_uuid = dbutils.widgets.get("dlt_pipeline_uuid").strip()
 pipeline_id       = dbutils.widgets.get("pipeline_id").strip()
 environment       = dbutils.widgets.get("environment").strip()
 config_out_dir    = dbutils.widgets.get("config_out_dir").strip()
+catalog           = dbutils.widgets.get("catalog").strip()
+control_schema    = dbutils.widgets.get("control_schema").strip()
+base_volume       = dbutils.widgets.get("base_volume").strip()
 
 if not dlt_pipeline_uuid:
     raise ValueError(
@@ -54,7 +59,11 @@ new_config_values = {
     "pipeline_id":    pipeline_id,
     "environment":    environment,
     "config_out_dir": config_out_dir,
+    "ctrl_schema":    f"{catalog}.{control_schema}" if catalog and control_schema else "",
+    "base_volume":    base_volume,
 }
+# Strip empty values — don't push blank keys into the pipeline config
+new_config_values = {k: v for k, v in new_config_values.items() if v}
 
 print("=" * 70)
 print("CONFIGURE PIPELINE — push job parameters into pipeline Configuration")

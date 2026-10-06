@@ -14,6 +14,12 @@ resources:
           default: ${var.environment}
         - name: pipeline_id
           default: ${var.pipeline_id}
+        - name: catalog
+          default: ${var.catalog}
+        - name: control_schema
+          default: ${var.control_schema}
+        - name: base_volume
+          default: ${var.base_volume}
       environments:
         - environment_key: Silver_to_gold_environment
           spec:
@@ -27,6 +33,9 @@ resources:
               pipeline_id: "{{job.parameters.pipeline_id}}"
               environment: "{{job.parameters.environment}}"
               config_out_dir: "{{job.parameters.config_out_dir}}"
+              catalog: "{{job.parameters.catalog}}"
+              control_schema: "{{job.parameters.control_schema}}"
+              base_volume: "{{job.parameters.base_volume}}"
           environment_key: Silver_to_gold_environment
 
         - task_key: Source_to_silver
@@ -46,4 +55,7 @@ resources:
               pipeline_id: "{{job.parameters.pipeline_id}}"
               environment: "{{job.parameters.environment}}"
               config_out_dir: "{{job.parameters.config_out_dir}}"
+              catalog: "{{job.parameters.catalog}}"
+              control_schema: "{{job.parameters.control_schema}}"
+              base_volume: "{{job.parameters.base_volume}}"
           environment_key: Silver_to_gold_environment

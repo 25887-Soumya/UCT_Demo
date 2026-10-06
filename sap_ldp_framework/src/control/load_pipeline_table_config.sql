@@ -1,5 +1,7 @@
 -- Databricks notebook source
 -- MAGIC %python
+-- MAGIC dbutils.widgets.text("catalog", "rgaplxdatabricks")
+-- MAGIC dbutils.widgets.text("control_schema", "uct_demo")
 -- MAGIC dbutils.widgets.text("pipeline_name", "")
 -- MAGIC dbutils.widgets.text("table_name", "")
 -- MAGIC dbutils.widgets.text("source_path", "")
@@ -18,7 +20,7 @@
 
 -- COMMAND ----------
 
-MERGE INTO rgaplxdatabricks.uct_demo.pipeline_table_config AS target
+MERGE INTO ${catalog}.${control_schema}.pipeline_table_config AS target
 USING (
     SELECT
         '${pipeline_name}' AS pipeline_name,

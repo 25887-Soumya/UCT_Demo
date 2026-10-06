@@ -22,6 +22,7 @@ from pyspark.sql.functions import current_timestamp
 from delta.tables import DeltaTable
 import os
 
+# Default — overridden by widget values below in section 1.
 CTRL = "rgaplxdatabricks.uct_demo"
 
 # ── 0. File-based logging setup ─────────────────────────────
@@ -38,6 +39,7 @@ CTRL = "rgaplxdatabricks.uct_demo"
 # exact same path lakeflow_pipeline.py already wrote to, as long as no
 # new config was registered in between. Construction is deferred until
 # after config resolution (section 2).
+# Default — overridden by widget values below in section 1.
 LOG_DIR        = "/Volumes/rgaplxdatabricks/temp_source/source_files/logs"
 COMPONENT      = "GOLD"
 _LOG_FILE_PATH  = None  # populated after config resolution — see _finalize_log_file below
@@ -99,14 +101,25 @@ def _finalize_log_file(pipeline_id: str, environment: str, run_ts: datetime):
 # ── 1. Widgets ───────────────────────────────────────────────
 dbutils.widgets.text("environment",       "",  "Environment")
 dbutils.widgets.text("pipeline_id",       "",  "Pipeline Id")
-dbutils.widgets.text("config_out_dir",
-    "/Volumes/rgaplxdatabricks/temp_source/source_files/configs", "Config Dir")
+dbutils.widgets.text("config_out_dir",    "",  "Config Dir (passed from job)")
 dbutils.widgets.text("dlt_pipeline_uuid", "",  "Bronze/Silver Lakeflow Pipeline UUID (optional)")
+dbutils.widgets.text("catalog",           "rgaplxdatabricks", "Target Catalog")
+dbutils.widgets.text("control_schema",    "uct_demo",         "Control Schema")
+dbutils.widgets.text("base_volume",       "",  "Framework volume path (passed from job)")
 
 environment       = dbutils.widgets.get("environment").strip()
 pipeline_id       = dbutils.widgets.get("pipeline_id").strip()
 config_out_dir    = dbutils.widgets.get("config_out_dir").strip()
 dlt_pipeline_uuid = dbutils.widgets.get("dlt_pipeline_uuid").strip()
+_catalog          = dbutils.widgets.get("catalog").strip()
+_control_schema   = dbutils.widgets.get("control_schema").strip()
+_base_volume      = dbutils.widgets.get("base_volume").strip()
+
+# Override module-level defaults with widget-resolved values
+if _catalog and _control_schema:
+    CTRL = f"{_catalog}.{_control_schema}"
+if _base_volume:
+    LOG_DIR = f"{_base_volume.rstrip('/')}/logs"
 
 if not pipeline_id:
     raise ValueError("Widget 'pipeline_id' is required.")

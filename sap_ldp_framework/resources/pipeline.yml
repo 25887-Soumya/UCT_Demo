@@ -10,6 +10,8 @@ resources:
       configuration:
         pipeline_id: ${var.pipeline_id}
         environment: ${var.environment}
+        ctrl_schema: ${var.catalog}.${var.control_schema}
+        base_volume: ${var.base_volume}
         config_out_dir: ${var.config_out_dir}
       libraries:
         - notebook:
