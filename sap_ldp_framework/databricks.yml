@@ -54,17 +54,17 @@ targets:
     workspace:
       host: https://adb-7405615385053650.10.azuredatabricks.net
 
-  # qa:
-  #   mode: production
-  #   workspace:
-  #     host: https://adb-7405615385053650.10.azuredatabricks.net
-  #     # Shared folder so qa is deployed once, not per user
-  #     root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
-  #   variables:
-  #     environment: qa
-  #     catalog: <qa_catalog>                      # TODO: replace
-  #     landing_base_path: /Volumes/<qa_catalog>/landing/landing_volume/   # TODO: replace
-  #     # base_volume and config_out_dir derive from catalog + control_schema
+  qa:
+    mode: production
+    workspace:
+      host: https://adb-8848629306534274.14.azuredatabricks.net
+      # Shared folder so qa is deployed once, not per user
+      root_path: /Workspace/Shared/.bundle/${bundle.name}/${bundle.target}
+    variables:
+      environment: qa
+      catalog: ingestion_cat                      # TODO: replace
+      landing_base_path: /Volumes/ingestion_test/landing/landing_volume/   # TODO: replace
+      # base_volume and config_out_dir derive from catalog + control_schema
 
   # prod:
   #   mode: production
