@@ -39,7 +39,6 @@ jobs:
 
     env:
       TARGET: ${{ inputs.target || 'dev' }}
-      DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
     defaults:
