@@ -1,20 +1,77 @@
 name: Validate bundle
 
+# Runs on every pull request into an environment branch.
+# No "paths" filter: these checks are required, and a required check that
+# never runs would block the merge.
 on:
   pull_request:
-    branches: [main]
+    branches: [dev, qa, main]
 
-env:
-  DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+permissions:
+  contents: read
 
 jobs:
-  validate:
+  # Enforces the promotion chain: feature -> dev -> qa -> main (prod)
+  promotion-rules:
+    name: promotion-rules
     runs-on: ubuntu-latest
-    environment: validate
+    steps:
+      - name: Check the source branch is allowed for this target
+        env:
+          BASE: ${{ github.base_ref }}
+          HEAD: ${{ github.head_ref }}
+        run: |
+          case "$BASE" in
+            dev)
+              exit 0 ;;
+            qa)
+              if [[ "$HEAD" == "dev" || "$HEAD" == "main" ]]; then exit 0; fi
+              echo "::error::Pull requests into qa must come from dev (or from main for a hotfix back-merge). Source was: $HEAD" ;;
+            main)
+              if [[ "$HEAD" == "qa" || "$HEAD" == hotfix/* ]]; then exit 0; fi
+              echo "::error::Pull requests into main must come from qa or a hotfix/* branch. Source was: $HEAD" ;;
+          esac
+          exit 1
+
+  # Validates the bundle for the environment the pull request is going into
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    # dev -> validate (dev token), qa -> validate-qa (QA token),
+    # main -> validate-prod once prod exists
+    environment: ${{ (github.base_ref == 'qa' && 'validate-qa') || (github.base_ref == 'main' && vars.PROD_ENABLED == 'true' && 'validate-prod') || 'validate' }}
+    env:
+      TARGET: ${{ (github.base_ref == 'qa' && 'qa') || (github.base_ref == 'main' && 'prod') || 'dev' }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
     defaults:
       run:
         working-directory: sap_ldp_framework
     steps:
       - uses: actions/checkout@v4
+
+      # Pin to a release tag from https://github.com/databricks/setup-cli/releases
       - uses: databricks/setup-cli@main
-      - run: databricks bundle validate -t dev
+
+      - name: Python syntax check
+        run: python -m compileall -q src
+
+      # Catches mistakes in the workflow files themselves (bad expressions,
+      # unknown keys, wrong job references) before they reach a branch
+      - name: Lint workflow files
+        working-directory: .
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color -shellcheck= -pyflakes=
+
+      - name: Check every target has a smoke test
+        run: |
+          test -f resources/smoke_test.yml || { echo "::error::resources/smoke_test.yml is missing"; exit 1; }
+          test -f src/tests/smoke_test.py   || { echo "::error::src/tests/smoke_test.py is missing"; exit 1; }
+
+      - name: Validate bundle for ${{ env.TARGET }}
+        if: env.TARGET != 'prod' || vars.PROD_ENABLED == 'true'
+        run: databricks bundle validate -t "$TARGET"
+
+      - name: Skip prod validation (prod target not set up yet)
+        if: env.TARGET == 'prod' && vars.PROD_ENABLED != 'true'
+        run: echo "PROD_ENABLED is not true - skipping prod validation."

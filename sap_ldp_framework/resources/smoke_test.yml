@@ -1,0 +1,36 @@
+# Post-deploy smoke test. Run by the deploy and rollback workflows with:
+#   databricks bundle run -t <target> smoke_test
+# It only reads metadata and lists folders: it never runs the pipeline or
+# writes data, so it is safe to run after every deploy.
+resources:
+  jobs:
+    smoke_test:
+      name: SMOKE_TEST_${bundle.target}
+      max_concurrent_runs: 1
+      timeout_seconds: 1800
+      parameters:
+        - name: expected_environment
+          default: ${bundle.target}
+        - name: environment
+          default: ${var.environment}
+        - name: catalog
+          default: ${var.catalog}
+        - name: control_schema
+          default: ${var.control_schema}
+        - name: pipeline_id
+          default: ${var.pipeline_id}
+        - name: base_volume
+          default: ${var.base_volume}
+        - name: config_out_dir
+          default: ${var.config_out_dir}
+        - name: dlt_pipeline_uuid
+          default: ${resources.pipelines.sap_lakeflow_pipeline.id}
+      environments:
+        - environment_key: smoke_test_environment
+          spec:
+            environment_version: "6"
+      tasks:
+        - task_key: smoke_test
+          notebook_task:
+            notebook_path: ../src/tests/smoke_test.py
+          environment_key: smoke_test_environment

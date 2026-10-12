@@ -1,0 +1,123 @@
+name: Rollback
+
+# Redeploys an earlier commit or tag to qa or prod.
+# Run it with "Use workflow from" set to the environment's branch:
+#   qa   -> qa
+#   prod -> main
+# Only commits that are already part of that branch can be rolled back to,
+# so unreviewed code can never be deployed this way.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Environment to roll back"
+        type: choice
+        required: true
+        options: [qa, prod]
+      ref:
+        description: "Tag (qa-..., release-...) or commit SHA to redeploy"
+        required: true
+      reason:
+        description: "Why are you rolling back?"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Check rollback request
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.expected.outputs.branch }}
+    steps:
+      - name: Work out the environment branch
+        id: expected
+        env:
+          TARGET: ${{ inputs.target }}
+          RUN_BRANCH: ${{ github.ref_name }}
+          PROD_ENABLED: ${{ vars.PROD_ENABLED }}
+        run: |
+          BRANCH=$([ "$TARGET" = "prod" ] && echo "main" || echo "$TARGET")
+          if [ "$TARGET" = "prod" ] && [ "$PROD_ENABLED" != "true" ]; then
+            echo "::error::Prod is not enabled yet (PROD_ENABLED is not true)."; exit 1
+          fi
+          if [ "$RUN_BRANCH" != "$BRANCH" ]; then
+            echo "::error::To roll back $TARGET, run this workflow with 'Use workflow from: $BRANCH' (it was run from '$RUN_BRANCH')."
+            exit 1
+          fi
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+  rollback:
+    name: Roll back ${{ inputs.target }} to ${{ inputs.ref }}
+    needs: check
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target }}       # same approvals as a normal deploy
+
+    # Shares the deploy workflow's lock, so a rollback and a deploy never overlap
+    concurrency:
+      group: deploy-${{ needs.check.outputs.branch }}
+      cancel-in-progress: false
+
+    env:
+      TARGET: ${{ inputs.target }}
+      BRANCH: ${{ needs.check.outputs.branch }}
+      DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
+
+    defaults:
+      run:
+        working-directory: sap_ldp_framework
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Check the commit was already on the ${{ needs.check.outputs.branch }} branch
+        working-directory: .
+        run: |
+          COMMIT=$(git rev-parse HEAD)
+          if ! git merge-base --is-ancestor "$COMMIT" "origin/$BRANCH"; then
+            echo "::error::$COMMIT is not part of the $BRANCH branch. Only reviewed commits can be rolled back to."
+            exit 1
+          fi
+          echo "ROLLBACK_SHA=$COMMIT" >> "$GITHUB_ENV"
+
+      # Pin to a release tag from https://github.com/databricks/setup-cli/releases
+      - uses: databricks/setup-cli@main
+
+      - name: Validate bundle
+        run: databricks bundle validate -t "$TARGET"
+
+      - name: Deploy bundle
+        run: databricks bundle deploy -t "$TARGET"
+
+      # Older commits may predate the smoke test, so only run it if it exists
+      - name: Smoke test
+        run: |
+          if [ -f resources/smoke_test.yml ]; then
+            databricks bundle run -t "$TARGET" smoke_test
+          else
+            echo "::warning::This commit has no smoke test - check the $TARGET workspace by hand."
+          fi
+
+      - name: Rollback summary
+        if: always()
+        env:
+          REASON: ${{ inputs.reason }}
+          REF: ${{ inputs.ref }}
+        run: |
+          {
+            echo "### Rollback of $TARGET: ${{ job.status }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Requested ref | \`$REF\` |"
+            echo "| Commit deployed | \`${ROLLBACK_SHA:-unknown}\` |"
+            echo "| Reason | $REASON |"
+            echo "| Run by | @${{ github.actor }} |"
+            echo ""
+            echo "**Next:** revert the bad change on \`$BRANCH\` with a pull request."
+            echo "Otherwise the next merge into \`$BRANCH\` deploys it again."
+          } >> "$GITHUB_STEP_SUMMARY"
