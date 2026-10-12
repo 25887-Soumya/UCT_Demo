@@ -1,44 +1,37 @@
 name: Deploy bundle
 
+# Each environment branch deploys its own target:
+#   dev  -> dev workspace
+#   qa   -> QA workspace
+#   main -> prod workspace (only when the PROD_ENABLED variable is "true")
 on:
-  # Automatic: every merge to main deploys to dev
   push:
-    branches: [main]
+    branches: [dev, qa, main]
     paths:
       - "sap_ldp_framework/**"
       - ".github/workflows/**"
-
-  # Manual: Actions tab -> "Deploy bundle" -> Run workflow -> pick environment
+  # Redeploys the branch picked in "Use workflow from" (dev, qa or main)
   workflow_dispatch:
-    inputs:
-      target:
-        description: "Environment to deploy to"
-        type: choice
-        required: true
-        default: dev
-        options:
-          - dev
-          - qa
-          - prod
 
 permissions:
-  contents: read
+  contents: write   # needed to push the release tag after a prod deploy
 
 jobs:
   deploy:
-    name: Deploy to ${{ inputs.target || 'dev' }}
+    name: Deploy ${{ github.ref_name }}
+    if: >-
+      contains(fromJSON('["dev","qa","main"]'), github.ref_name) &&
+      (github.ref_name != 'main' || vars.PROD_ENABLED == 'true')
     runs-on: ubuntu-latest
-
-    # Picks the GitHub environment (and its secrets / approval rules) to match
-    environment: ${{ inputs.target || 'dev' }}
+    environment: ${{ github.ref_name == 'main' && 'prod' || github.ref_name }}
 
     # Never run two deploys to the same environment at once
     concurrency:
-      group: deploy-${{ inputs.target || 'dev' }}
+      group: deploy-${{ github.ref_name }}
       cancel-in-progress: false
 
     env:
-      TARGET: ${{ inputs.target || 'dev' }}
+      TARGET: ${{ github.ref_name == 'main' && 'prod' || github.ref_name }}
       DATABRICKS_TOKEN: ${{ secrets.DATABRICKS_TOKEN }}
 
     defaults:
@@ -59,3 +52,104 @@ jobs:
 
       - name: Deploy bundle
         run: databricks bundle deploy -t "$TARGET"
+
+      # Read-only checks that the deployment is wired to this environment.
+      # A failure stops here: no promotion PR is opened.
+      - name: Smoke test
+        run: databricks bundle run -t "$TARGET" smoke_test
+
+      # QA deploys get a qa-<timestamp> tag so they can be rolled back by name
+      - name: Tag QA deploy
+        if: env.TARGET == 'qa'
+        working-directory: .
+        run: |
+          TAG="qa-$(date -u +%Y%m%d-%H%M%S)"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+          echo "DEPLOY_TAG=$TAG" >> "$GITHUB_ENV"
+
+      # Prod deploys publish a GitHub Release with notes from the merged PRs
+      - name: Publish GitHub Release
+        if: env.TARGET == 'prod'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="release-$(date -u +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" --target "$GITHUB_SHA" \
+            --title "Prod release $TAG" --generate-notes
+          echo "DEPLOY_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Deployment summary
+        if: always()
+        run: |
+          {
+            echo "### Deploy to $TARGET: ${{ job.status }}"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Branch | \`${{ github.ref_name }}\` |"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+            echo "| Tag | \`${DEPLOY_TAG:-none}\` |"
+            echo ""
+            echo "To roll back, run the **Rollback** workflow with this commit or tag."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # After a successful dev deploy: open (or update) the dev -> qa PR.
+  # After a successful qa deploy:  open (or update) the qa -> main PR.
+  # Approval and merge stay manual; merging triggers the next deploy.
+  open-promotion-pr:
+    name: Open promotion PR
+    needs: deploy
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref_name == 'dev' || (github.ref_name == 'qa' && vars.PROD_ENABLED == 'true'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # PRs opened with the default GITHUB_TOKEN do not trigger the required
+      # checks, so the PR is opened as a GitHub App ("bot") instead.
+      - name: Get bot token
+        id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.PROMOTION_APP_ID }}
+          private-key: ${{ secrets.PROMOTION_APP_PRIVATE_KEY }}
+
+      - name: Open or update the promotion PR
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          GH_REPO: ${{ github.repository }}
+          HEAD: ${{ github.ref_name }}
+          BASE: ${{ github.ref_name == 'dev' && 'qa' || 'main' }}
+          ENV_LABEL: ${{ github.ref_name == 'dev' && 'QA' || 'prod' }}
+          REVIEWERS: ${{ github.ref_name == 'dev' && vars.QA_REVIEWERS || vars.PROD_REVIEWERS }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # Anything to promote?
+          AHEAD=$(gh api "repos/$GH_REPO/compare/$BASE...$HEAD" --jq '.ahead_by')
+          if [ "$AHEAD" = "0" ]; then
+            echo "$HEAD has nothing that $BASE does not already have. No PR needed."
+            exit 0
+          fi
+
+          # Already an open promotion PR? It follows the branch, so just add a note.
+          EXISTING=$(gh pr list --base "$BASE" --head "$HEAD" --state open \
+                       --json number --jq '.[0].number // empty')
+          if [ -n "$EXISTING" ]; then
+            gh pr comment "$EXISTING" --body "$HEAD was deployed again at \`$GITHUB_SHA\` ([run]($RUN_URL)). This PR now includes those changes, so please review and approve again."
+            echo "Updated existing PR #$EXISTING"
+            exit 0
+          fi
+
+          # Otherwise open a new one and request the reviewers
+          BODY=$(printf '%s\n\n%s\n\n%s' \
+            "Opened automatically after a successful **$HEAD** deploy ([run]($RUN_URL)), commit \`$GITHUB_SHA\`." \
+            "Review the commits in this PR. After 2 approvals, merge with **Create a merge commit** to deploy **$ENV_LABEL**." \
+            "Do not squash or rebase this PR.")
+          ARGS=(--base "$BASE" --head "$HEAD"
+                --title "Promote $HEAD to $ENV_LABEL - $(date -u +%Y-%m-%d)"
+                --body "$BODY")
+          if [ -n "$REVIEWERS" ]; then ARGS+=(--reviewer "$REVIEWERS"); fi
+          gh pr create "${ARGS[@]}"
