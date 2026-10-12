@@ -5,7 +5,7 @@ include:
   - resources/*.yml
 
 variables:
-  # ── Identity: catalog, schemas, pipeline name, environment ────────────
+  # ── Identity: catalog, schemas, pipeline name, environment ────────────--
   catalog:
     description: UC catalog for all output and control tables (used by every notebook)
     default: rgaplxdatabricks
