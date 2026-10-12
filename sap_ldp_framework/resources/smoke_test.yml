@@ -7,8 +7,6 @@ resources:
     smoke_test:
       name: SMOKE_TEST_${bundle.target}
       max_concurrent_runs: 1
-      tags:
-           rollback_test: second-change
       timeout_seconds: 1800
       parameters:
         - name: expected_environment
