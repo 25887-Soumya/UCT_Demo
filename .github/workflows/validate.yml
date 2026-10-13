@@ -11,27 +11,52 @@ permissions:
   contents: read
 
 jobs:
-  # Enforces the promotion chain: feature -> dev -> qa -> main (prod)
+  # Feature-to-each-environment model:
+  #   feature/x (from main) --PR--> dev --PR--> qa --PR--> main
+  # The same feature branch is merged into each environment separately, so
+  # only the features you choose move. This check enforces the order:
+  #   - into dev : feature/*, hotfix/*, or main (to refresh dev from prod)
+  #   - into qa  : feature/* already merged into dev, hotfix/*, or main
+  #   - into main: feature/* already merged into qa, or hotfix/*
   promotion-rules:
     name: promotion-rules
     runs-on: ubuntu-latest
     steps:
-      - name: Check the source branch is allowed for this target
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the source branch and that lower environments have it
         env:
           BASE: ${{ github.base_ref }}
           HEAD: ${{ github.head_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          case "$BASE" in
-            dev)
-              exit 0 ;;
-            qa)
-              if [[ "$HEAD" == "dev" || "$HEAD" == "main" ]]; then exit 0; fi
-              echo "::error::Pull requests into qa must come from dev (or from main for a hotfix back-merge). Source was: $HEAD" ;;
-            main)
-              if [[ "$HEAD" == "qa" || "$HEAD" == hotfix/* ]]; then exit 0; fi
-              echo "::error::Pull requests into main must come from qa or a hotfix/* branch. Source was: $HEAD" ;;
+          fail() { echo "::error::$1"; exit 1; }
+
+          # "Is every commit of this branch already in <env>?"
+          already_in() {
+            git fetch -q origin "$1"
+            git merge-base --is-ancestor "$HEAD_SHA" "origin/$1"
+          }
+
+          case "$HEAD" in
+            feature/*|hotfix/*) ;;
+            main) [ "$BASE" != "main" ] && exit 0 ;;   # refresh dev or qa from prod
+            *) fail "Branch '$HEAD' is not allowed. Use feature/<name> (or hotfix/<name> for urgent prod fixes)." ;;
           esac
-          exit 1
+
+          case "$BASE" in
+            dev) exit 0 ;;
+            qa)
+              [[ "$HEAD" == hotfix/* ]] && exit 0
+              already_in dev || fail "'$HEAD' has commits that are not in dev yet. Merge it into dev first (with 'Create a merge commit'), then re-run this check." ;;
+            main)
+              [[ "$HEAD" == hotfix/* ]] && exit 0
+              already_in qa || fail "'$HEAD' has commits that are not in qa yet. Merge it into qa first (with 'Create a merge commit'), then re-run this check." ;;
+            *) fail "Unexpected target branch '$BASE'." ;;
+          esac
+          echo "OK: $HEAD -> $BASE"
 
   # Validates the bundle for the environment the pull request is going into
   validate:

@@ -1,7 +1,5 @@
 -- Databricks notebook source
 -- MAGIC %python
--- MAGIC dbutils.widgets.text("catalog", "rgaplxdatabricks")
--- MAGIC dbutils.widgets.text("control_schema", "uct_demo")
 -- MAGIC dbutils.widgets.text("pipeline_name", "")
 -- MAGIC dbutils.widgets.text("table_name", "")
 -- MAGIC dbutils.widgets.text("source_path", "")
@@ -17,70 +15,70 @@
 -- MAGIC dbutils.widgets.text("load_type", "full")
 -- MAGIC dbutils.widgets.text("soft_delete_condition", "")
 -- MAGIC dbutils.widgets.dropdown("is_active", "true", ["true", "false"])
+-- MAGIC
+-- MAGIC # NEW: skip_source_to_landing — when true, this table's landing drop is
+-- MAGIC # produced by jdbc_extract_to_landing.py instead of an external process.
+-- MAGIC # connection_name — which rgaplxdatabricks.uct_demo.tbl_connection row to
+-- MAGIC # use for the JDBC extract. Only meaningful when skip_source_to_landing=true,
+-- MAGIC # but always accepted so it's set before the flag is flipped on.
+-- MAGIC dbutils.widgets.dropdown("skip_source_to_landing", "false", ["true", "false"])
+-- MAGIC dbutils.widgets.text("connection_name", "")
+-- MAGIC
+-- MAGIC # OPTIONAL overrides (leave blank = NULL). SQL_SERVER: used if present, else NULL.
+-- MAGIC # SAP: if present, OVERWRITES the value read from .sap.partfile.metadata.
+-- MAGIC dbutils.widgets.text("watermark_col", "")
+-- MAGIC dbutils.widgets.text("operation_col", "")
+-- MAGIC dbutils.widgets.text("sequence_col", "")
 
 -- COMMAND ----------
 
-MERGE INTO ${catalog}.${control_schema}.pipeline_table_config AS target
+MERGE INTO rgaplxdatabricks.uct_demo.pipeline_table_config AS target
 USING (
     SELECT
         '${pipeline_name}' AS pipeline_name,
         '${table_name}' AS table_name,
-
-        NULLIF('${source_path}', '') AS source_path,
-        NULLIF('${bronze_schema}', '') AS bronze_schema,
-        NULLIF('${silver_schema}', '') AS silver_schema,
-        NULLIF('${gold_schema}', '') AS gold_schema,
-        NULLIF('${silver_table}', '') AS silver_table,
-        NULLIF('${gold_view}', '') AS gold_view,
-        NULLIF('${load_type}', '') AS load_type,
-        NULLIF('${soft_delete_condition}', '') AS soft_delete_condition,
-        NULLIF('${gold_sql_file}', '') AS gold_sql_file,
-        NULLIF('${depends_on_silvers}', '') AS depends_on_silvers,
-
+        '${source_path}' AS source_path,
+        '${bronze_schema}' AS bronze_schema,
+        '${silver_schema}' AS silver_schema,
+        '${gold_schema}' AS gold_schema,
+        '${silver_table}' AS silver_table,
+        '${gold_view}' AS gold_view,
         CASE
-            WHEN '${is_active}' = '' THEN NULL
-            ELSE CAST('${is_active}' AS BOOLEAN)
-        END AS is_active
-
+            WHEN '${load_type}' = '' THEN 'full'
+            ELSE '${load_type}'
+        END AS load_type,
+        NULLIF('${soft_delete_condition}', '') AS soft_delete_condition,
+        CAST('${is_active}' AS BOOLEAN) AS is_active,
+        CAST('${skip_source_to_landing}' AS BOOLEAN) AS skip_source_to_landing,
+        NULLIF('${connection_name}', '') AS connection_name,
+        NULLIF('${watermark_col}', '') AS watermark_col,
+        NULLIF('${operation_col}', '') AS operation_col,
+        NULLIF('${sequence_col}', '') AS sequence_col,
+		NULLIF('${gold_sql_file}', '') AS gold_sql_file,
+        NULLIF('${depends_on_silvers}', '') AS depends_on_silvers
 ) AS source
 
-ON target.pipeline_name = source.pipeline_name
+ON  target.pipeline_name = source.pipeline_name
 AND target.table_name = source.table_name
 
 WHEN MATCHED THEN
     UPDATE SET
-        target.source_path =
-            COALESCE(source.source_path, target.source_path),
-
-        target.bronze_schema =
-            COALESCE(source.bronze_schema, target.bronze_schema),
-
-        target.silver_schema =
-            COALESCE(source.silver_schema, target.silver_schema),
-
-        target.gold_schema =
-            COALESCE(source.gold_schema, target.gold_schema),
-
-        target.silver_table =
-            COALESCE(source.silver_table, target.silver_table),
-
-        target.gold_view =
-            COALESCE(source.gold_view, target.gold_view),
-
-        target.load_type =
-            COALESCE(source.load_type, target.load_type),
-
-        target.soft_delete_condition =
-            COALESCE(source.soft_delete_condition, target.soft_delete_condition),
-
-        target.is_active =
-            COALESCE(source.is_active, target.is_active),
-
-        target.gold_sql_file =
-            COALESCE(source.gold_sql_file, target.gold_sql_file),
-
-        target.depends_on_silvers =
-            COALESCE(source.depends_on_silvers, target.depends_on_silvers)
+        target.source_path             = source.source_path,
+        target.bronze_schema           = source.bronze_schema,
+        target.silver_schema           = source.silver_schema,
+        target.gold_schema             = source.gold_schema,
+        target.silver_table            = source.silver_table,
+        target.gold_view               = source.gold_view,
+        target.load_type               = source.load_type,
+        target.soft_delete_condition   = source.soft_delete_condition,
+        target.is_active               = source.is_active,
+        target.skip_source_to_landing  = source.skip_source_to_landing,
+        target.connection_name         = source.connection_name,
+        target.watermark_col           = source.watermark_col,
+        target.operation_col           = source.operation_col,
+        target.sequence_col            = source.sequence_col,
+		target.gold_sql_file 		   = COALESCE(source.gold_sql_file, target.gold_sql_file),
+        target.depends_on_silvers      = COALESCE(source.depends_on_silvers, target.depends_on_silvers)
 
 WHEN NOT MATCHED THEN
     INSERT (
@@ -95,7 +93,12 @@ WHEN NOT MATCHED THEN
         load_type,
         soft_delete_condition,
         is_active,
-        gold_sql_file,
+        skip_source_to_landing,
+        connection_name,
+        watermark_col,
+        operation_col,
+        sequence_col,
+		gold_sql_file,
         depends_on_silvers
     )
     VALUES (
@@ -107,26 +110,14 @@ WHEN NOT MATCHED THEN
         source.gold_schema,
         source.silver_table,
         source.gold_view,
-
-        COALESCE(source.load_type, 'full'),
-
+        source.load_type,
         source.soft_delete_condition,
         source.is_active,
-        source.gold_sql_file,
+        source.skip_source_to_landing,
+        source.connection_name,
+        source.watermark_col,
+        source.operation_col,
+        source.sequence_col,
+		source.gold_sql_file,
         source.depends_on_silvers
     );
-
--- COMMAND ----------
-
-
-
--- COMMAND ----------
-
-
-
--- COMMAND ----------
-
-
-
--- COMMAND ----------
-

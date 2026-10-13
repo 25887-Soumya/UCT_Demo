@@ -17,7 +17,7 @@ variables:
     default: sap_demo_bronze
   pipeline_id:
     description: pipeline_name registered in pipeline_table_config
-    default: sap_demo_uct
+    default: sql_demo_uct_bundle.
   environment:
     description: dev | qa | prod
     default: dev
