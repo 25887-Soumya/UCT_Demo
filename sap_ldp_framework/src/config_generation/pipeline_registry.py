@@ -24,7 +24,11 @@ logger.setLevel(logging.INFO)
 
 # Default control schema — overridden by metadataloader_updated after
 # its catalog / control_schema widgets are resolved.
-CTRL = "rgaplxdatabricks.uct_demo"
+# "<catalog>.<control_schema>" - set by metadata_loader.py from its catalog
+# and control_schema job parameters before any registry method runs. Read
+# when the methods run (not when this file is loaded), so the loader's
+# value is always the one used.
+CTRL = None
 
 # ── The menu of allowed "how does this table refresh" options ───────────────
 # Keeping this as a fixed list (instead of letting people type anything) means
@@ -104,6 +108,11 @@ class PipelineRegistry:
                  alert_email:    str = "",
                  notes:          str = ""):
 
+        if not CTRL:
+            raise RegistrationError(
+                "CTRL (control schema) is not set - run the registry through "
+                "metadata_loader.py, which sets it from the catalog and "
+                "control_schema job parameters.")
         if not pipeline_id.strip():
             raise RegistrationError("pipeline_id is required")
         if not PIPELINE_ID_RE.match(pipeline_id.strip()):
