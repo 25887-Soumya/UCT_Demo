@@ -17,13 +17,12 @@ import re
 import json
 import uuid
 from datetime import datetime, timedelta
-import hashlib
+
 from pyspark.sql.functions import current_timestamp
 from delta.tables import DeltaTable
 import os
 
-# Default — overridden by widget values below in section 1.
-CTRL = "rgaplxdatabricks.uct_demo"
+CTRL = None  # "<catalog>.<control_schema>", set from the job parameters in section 1
 
 # ── 0. File-based logging setup ─────────────────────────────
 #
@@ -32,15 +31,14 @@ CTRL = "rgaplxdatabricks.uct_demo"
 # log(), into a per-run file under LOG_DIR. Volumes paths are
 # FUSE-mounted under /Volumes, so plain Python file I/O works here.
 #
-# SHARED FILE WITH lakeflow_pipeline.py: see the matching comment there
+# SHARED FILE WITH bronze_pipeline_1.py AND silver_pipeline_1.py: see the
 # — the filename is timestamped with the RESOLVED CONFIG's own
 # timestamp (config_ts), not datetime.now(), so this task (which runs
 # SECOND, after the bronze/silver Lakeflow pipeline task) lands on the
-# exact same path lakeflow_pipeline.py already wrote to, as long as no
+# exact same path those two pipelines already wrote to, as long as no
 # new config was registered in between. Construction is deferred until
 # after config resolution (section 2).
-# Default — overridden by widget values below in section 1.
-LOG_DIR        = "/Volumes/rgaplxdatabricks/temp_source/source_files/logs"
+LOG_DIR        = None  # set from framework_root in section 1
 COMPONENT      = "GOLD"
 _LOG_FILE_PATH  = None  # populated after config resolution — see _finalize_log_file below
 
@@ -73,11 +71,12 @@ def log(stage: str, message: str, level: str = "INFO"):
 def _finalize_log_file(pipeline_id: str, environment: str, run_ts: datetime):
     """
     Called once config_ts is known (section 2, below). Reads any content
-    ALREADY at the shared path first (written by lakeflow_pipeline.py,
+    ALREADY at the shared path first (written by bronze_pipeline_1.py and
+    silver_pipeline_1.py,
     which runs before this task) and prepends it to this process's
     buffer, so gold's own lines are appended to — not written over —
     whatever bronze/silver already logged. See the matching function in
-    lakeflow_pipeline.py for the full rationale.
+    those two pipelines for the full rationale.
     """
     global _LOG_FILE_PATH
     run_ts_str = run_ts.strftime("%Y%m%d_%H%M%S")
@@ -101,30 +100,37 @@ def _finalize_log_file(pipeline_id: str, environment: str, run_ts: datetime):
 # ── 1. Widgets ───────────────────────────────────────────────
 dbutils.widgets.text("environment",       "",  "Environment")
 dbutils.widgets.text("pipeline_id",       "",  "Pipeline Id")
-dbutils.widgets.text("config_out_dir",    "",  "Config Dir (passed from job)")
-dbutils.widgets.text("dlt_pipeline_uuid", "",  "Bronze/Silver Lakeflow Pipeline UUID (optional)")
-dbutils.widgets.text("catalog",           "rgaplxdatabricks", "Target Catalog")
-dbutils.widgets.text("control_schema",    "uct_demo",         "Control Schema")
-dbutils.widgets.text("base_volume",       "",  "Framework volume path (passed from job)")
+dbutils.widgets.text("catalog",           "",  "Catalog")
+dbutils.widgets.text("control_schema",    "",  "Control schema")
+dbutils.widgets.text("framework_root",    "",  "Framework root (default /Volumes/<catalog>/<control_schema>/landing)")
+dbutils.widgets.text("bronze_pipeline_uuid", "",  "Bronze Lakeflow Pipeline UUID (optional)")
+dbutils.widgets.text("silver_pipeline_uuid", "",  "Silver Lakeflow Pipeline UUID (optional)")
 
-environment       = dbutils.widgets.get("environment").strip()
-pipeline_id       = dbutils.widgets.get("pipeline_id").strip()
-config_out_dir    = dbutils.widgets.get("config_out_dir").strip()
-dlt_pipeline_uuid = dbutils.widgets.get("dlt_pipeline_uuid").strip()
-_catalog          = dbutils.widgets.get("catalog").strip()
-_control_schema   = dbutils.widgets.get("control_schema").strip()
-_base_volume      = dbutils.widgets.get("base_volume").strip()
-
-# Override module-level defaults with widget-resolved values
-if _catalog and _control_schema:
-    CTRL = f"{_catalog}.{_control_schema}"
-if _base_volume:
-    LOG_DIR = f"{_base_volume.rstrip('/')}/logs"
+environment           = dbutils.widgets.get("environment").strip()
+pipeline_id           = dbutils.widgets.get("pipeline_id").strip()
+catalog               = dbutils.widgets.get("catalog").strip()
+control_schema        = dbutils.widgets.get("control_schema").strip()
+framework_root        = dbutils.widgets.get("framework_root").strip()
+bronze_pipeline_uuid  = dbutils.widgets.get("bronze_pipeline_uuid").strip()
+silver_pipeline_uuid  = dbutils.widgets.get("silver_pipeline_uuid").strip()
 
 if not pipeline_id:
     raise ValueError("Widget 'pipeline_id' is required.")
 if not environment:
     raise ValueError("Widget 'environment' is required.")
+if not catalog or not control_schema:
+    raise ValueError("Widgets 'catalog' and 'control_schema' are required.")
+
+# One folder root per environment for everything the framework writes or reads:
+#   {framework_root}/configs/<pipeline_id>/   generated config JSON
+#   {framework_root}/sql_files/               gold SQL files
+#   {framework_root}/logs/                    run logs (shared by bronze, silver, gold)
+#   {framework_root}/schema/<layer>/          Auto Loader schema locations
+# Default: /Volumes/<catalog>/<control_schema>/landing
+framework_root = (framework_root or f"/Volumes/{catalog}/{control_schema}/landing").rstrip("/")
+CTRL           = f"{catalog}.{control_schema}"
+config_out_dir = f"{framework_root}/configs"
+LOG_DIR        = f"{framework_root}/logs"
 
 try:
     os.makedirs(LOG_DIR, exist_ok=True)
@@ -132,10 +138,11 @@ except Exception as _log_init_ex:
     print(f"  WARNING: could not initialize log directory {LOG_DIR}: {_log_init_ex}")
 
 log("WIDGETS", f"Widgets resolved -> pipeline_id={pipeline_id!r} environment={environment!r} "
-    f"dlt_pipeline_uuid={dlt_pipeline_uuid!r}")
+    f"bronze_pipeline_uuid={bronze_pipeline_uuid!r} silver_pipeline_uuid={silver_pipeline_uuid!r}")
+log("WIDGETS", f"Control schema: {CTRL} | framework root: {framework_root}")
 log("WIDGETS", "Log file path pending — finalized once config_ts is resolved (section 2)")
 
-# ── 2. Resolve latest config (same logic/layout as lakeflow_pipeline.py) ──
+# ── 2. Resolve latest config (same logic/layout as bronze_pipeline_1.py / silver_pipeline_1.py) ──
 log("CONFIG_RESOLVE", f"Resolving latest config in {config_out_dir.rstrip('/')}/{pipeline_id}")
 pipeline_config_dir = f"{config_out_dir.rstrip('/')}/{pipeline_id}"
 
@@ -174,7 +181,7 @@ if not config_path:
 
 _finalize_log_file(pipeline_id, environment, config_ts)
 log("CONFIG_RESOLVE", f"Config resolved: {config_path} (timestamp={config_ts})")
-log("CONFIG_RESOLVE", f"Log file: {_LOG_FILE_PATH}  (shared with lakeflow_pipeline.py — "
+log("CONFIG_RESOLVE", f"Log file: {_LOG_FILE_PATH}  (shared with bronze_pipeline_1.py / silver_pipeline_1.py — "
                        f"appended to, not overwritten, if that task already wrote to it)")
 config_str = "\n".join(r.value for r in spark.read.text(config_path).collect())
 config = json.loads(config_str)
@@ -441,31 +448,36 @@ today_metrics = {}
 
 # ── 4. Harvest REAL bronze/silver metrics from the Lakeflow event log ─
 #
-# lakeflow_pipeline.py can NEVER write to pipeline_runs/pipeline_alerts
-# directly — spark.sql() DDL/DML is rejected inside a Lakeflow/SDP
-# pipeline source file no matter where it's placed (confirmed:
-# UNSUPPORTED_SPARK_SQL_COMMAND — SDP evaluates that whole file as a
-# declarative graph; dataset functions may only define/return
-# DataFrames). So this step is the ONLY place bronze/silver get logged
-# at all — it INSERTs fresh rows (there is nothing pre-existing to
-# UPDATE), reading real per-table status straight from the event log
-# (event log is now used for STATUS/TIMING/rows_rejected only — see
+# Neither bronze_pipeline_1.py nor silver_pipeline_1.py can ever write to
+# pipeline_runs/pipeline_alerts directly — spark.sql() DDL/DML is rejected
+# inside a Lakeflow/SDP pipeline source file no matter where it's placed
+# (confirmed: UNSUPPORTED_SPARK_SQL_COMMAND — SDP evaluates that whole
+# file as a declarative graph; dataset functions may only define/return
+# DataFrames). So this step is the ONLY place bronze/silver get logged at
+# all — it INSERTs fresh rows (there is nothing pre-existing to UPDATE),
+# reading real per-table status straight from each pipeline's own event
+# log (event log is now used for STATUS/TIMING/rows_rejected only — see
 # _delta_commit_metrics above for why row VOLUMES come from Delta's own
 # transaction log instead), and raises a pipeline_alerts row for anything
 # that failed.
 #
-# Needs the actual Databricks Lakeflow pipeline UUID (not our pipeline_id
-# string) — pass it via the dlt_pipeline_uuid widget/job parameter. If
-# omitted, this step is skipped with a warning; gold still runs, but
-# bronze/silver won't have any pipeline_runs rows for that run.
-#
-# IMPORTANT: this query is filtered to run_group_id (the MOST RECENT
-# update_id on this pipeline) — earlier versions of this harvest had no
-# such filter and re-inserted a fresh pipeline_runs row for the ENTIRE
-# event log history on every single gold_pipeline.py run, duplicating
-# without bound. run_group_id is also what ties this run's bronze/silver
-# rows to its gold rows (section 6) and its reconciliation rows
-# (section 5/7) into one queryable unit.
+# UPDATED for the bronze/silver split: bronze and silver are now TWO
+# separate Lakeflow pipelines with two separate event logs and two
+# separate update_ids — previously one combined pipeline meant one event
+# log and one update_id could double as BOTH "what to filter the event
+# log query on" AND "the correlation key tying bronze+silver+gold rows
+# for this run together" (run_group_id). Those two jobs are now split:
+#   - run_group_id is a fresh uuid generated once per gold_pipeline.py
+#     run, used purely to correlate pipeline_runs/pipeline_reconciliation
+#     rows across bronze + silver + gold for this one job execution.
+#   - each pipeline's own latest update_id is still resolved, but only
+#     to scope THAT pipeline's event_log() query — it's a local variable
+#     inside _harvest_pipeline(), never written to pipeline_runs.
+# Needs the actual Databricks Lakeflow pipeline UUIDs (not our
+# pipeline_id string) — passed via the bronze_pipeline_uuid /
+# silver_pipeline_uuid widgets/job parameters. If either is omitted,
+# that pipeline's harvest is skipped with a warning; gold still runs,
+# but that pipeline's flows won't have pipeline_runs rows for this run.
 
 layer_by_target = {
     l["target"]["table_name"]: l
@@ -488,11 +500,23 @@ def _lineage_for_dlt_layer(layer: dict):
     else:
         return None, None, None, None
 
-run_group_id = None
+run_group_id = str(uuid.uuid4())
+log("EVENT_LOG_HARVEST", f"run_group_id (job-run correlation key, shared across "
+    f"bronze+silver+gold for this run) = {run_group_id}")
 
-if dlt_pipeline_uuid:
-    log("EVENT_LOG_HARVEST", f"Resolving latest update_id on pipeline {dlt_pipeline_uuid} "
-        f"as this run's run_group_id")
+def _harvest_pipeline(dlt_pipeline_uuid: str, label: str):
+    """Harvests flow_progress events for ONE Lakeflow pipeline (bronze or
+    silver) into pipeline_runs. Filters its event_log() to that
+    pipeline's own latest update_id (a LOCAL concept, not run_group_id).
+    Returns the count of flows harvested."""
+    if not dlt_pipeline_uuid:
+        log("EVENT_LOG_HARVEST",
+            f"{label}_pipeline_uuid not provided — skipping event log harvest "
+            f"for {label} (gold will still run, but {label} won't be logged "
+            f"to pipeline_runs for this run).", level="WARNING")
+        return 0
+
+    log("EVENT_LOG_HARVEST", f"Resolving latest update_id on {label} pipeline {dlt_pipeline_uuid}")
     try:
         latest_row = spark.sql(f"""
             SELECT origin.update_id AS update_id
@@ -501,21 +525,22 @@ if dlt_pipeline_uuid:
             ORDER BY timestamp DESC
             LIMIT 1
         """).collect()
-        run_group_id = latest_row[0]["update_id"] if latest_row else None
+        update_id = latest_row[0]["update_id"] if latest_row else None
     except Exception as exc:
-        log("EVENT_LOG_HARVEST", f"Could not resolve latest update_id: {exc}", level="WARNING")
+        log("EVENT_LOG_HARVEST", f"Could not resolve latest update_id for {label}: {exc}", level="WARNING")
+        update_id = None
 
-    if not run_group_id:
+    if not update_id:
         log("EVENT_LOG_HARVEST",
-            "No update_id found in event log yet — falling back to a fresh "
-            "run_group_id; bronze/silver rows for this run may be missing "
-            "if the DLT update hasn't produced any events.", level="WARNING")
-        run_group_id = str(uuid.uuid4())
-    else:
-        log("EVENT_LOG_HARVEST", f"run_group_id = {run_group_id}")
+            f"No update_id found in {label}'s event log yet — skipping this run; "
+            f"{label} rows will be missing until its next DLT update produces events.",
+            level="WARNING")
+        return 0
 
-    log("EVENT_LOG_HARVEST", f"Harvesting bronze/silver metrics from "
-        f"event_log('{dlt_pipeline_uuid}') for update_id={run_group_id}")
+    log("EVENT_LOG_HARVEST", f"Harvesting {label} metrics from "
+        f"event_log('{dlt_pipeline_uuid}') for update_id={update_id}")
+
+    harvested = 0
     try:
         # Event log is used for TIMING and FAILURE metrics only now —
         # MIN/MAX(timestamp) per flow gives a real started_at/completed_at,
@@ -546,7 +571,7 @@ if dlt_pipeline_uuid:
                     timestamp
                 FROM event_log('{dlt_pipeline_uuid}')
                 WHERE event_type = 'flow_progress'
-                  AND origin.update_id = '{run_group_id}'
+                  AND origin.update_id = '{update_id}'
                   AND origin.flow_name IS NOT NULL
             )
             SELECT
@@ -560,22 +585,21 @@ if dlt_pipeline_uuid:
             GROUP BY flow_name
             ORDER BY started_at
         """)
-        # ORDER BY started_at: bronze flows commit before the silver flows
-        # that read from them within the same update, so processing rows
-        # in that order means today_metrics[bronze_table] is already
-        # populated by the time we reach that bronze table's silver flow
-        # and need to pass its rows_read through.
+        # ORDER BY started_at: within bronze's own harvest, and separately
+        # within silver's, flows are processed oldest-first. Bronze is
+        # harvested (as a whole call) before silver below, so
+        # today_metrics[bronze_table] is already populated by the time
+        # silver's rows_read passthrough needs it.
         rows = event_df.collect()
-        harvested = 0
         for r in rows:
-            layer_name    = r["flow_name"]
+            layer_name = r["flow_name"]
             if r["reached_terminal"] == 0:
                 # Flow has progress events this update but hasn't reached
                 # COMPLETED/FAILED yet (still running, or update still in
                 # flight) — skip it this run rather than log a bogus
                 # "success" for a flow that isn't actually done.
                 log("EVENT_LOG_HARVEST",
-                    f"Flow '{layer_name}' has no terminal event yet — skipping "
+                    f"Flow '{layer_name}' ({label}) has no terminal event yet — skipping "
                     f"(will be picked up on a later gold_pipeline.py run)",
                     level="WARNING")
                 continue
@@ -591,7 +615,7 @@ if dlt_pipeline_uuid:
             else:
                 stage, source_path, bronze_table, silver_table, dlt_mode = None, None, None, None, None
                 log("EVENT_LOG_HARVEST",
-                    f"Flow '{layer_name}' not found in config['layers'] — "
+                    f"Flow '{layer_name}' ({label}) not found in config['layers'] — "
                     f"logging without lineage enrichment", level="WARNING")
 
             own_table = bronze_table if stage == "source_to_bronze" else silver_table
@@ -616,8 +640,10 @@ if dlt_pipeline_uuid:
                 # silver this run (deletes excluded — matches how you
                 # defined bronze_to_silver rows_written).
                 # rows_read = pass-through of bronze's rows_written from
-                # this SAME harvest pass — "what came into bronze this
-                # run" is exactly "what silver read from bronze this run".
+                # THIS SAME gold_pipeline.py run's harvest — "what came
+                # into bronze this run" is exactly "what silver read from
+                # bronze this run". Relies on bronze having already been
+                # harvested (see the call order after this function def).
                 rows_written = commit_metrics["written"] if commit_metrics else None
                 rows_read = today_metrics.get(bronze_table, {}).get("written")
             else:
@@ -646,24 +672,23 @@ if dlt_pipeline_uuid:
             if status == "failed":
                 _log_alert(
                     layer_name,
-                    subject=f"[{environment.upper()}] Bronze/silver layer failed — {layer_name}",
+                    subject=f"[{environment.upper()}] {label.capitalize()} layer failed — {layer_name}",
                     body=(f"Pipeline: {pipeline_id}\nLayer: {layer_name}\nStage: {stage}\n"
-                          f"Environment: {environment}\nDLT pipeline UUID: {dlt_pipeline_uuid}\n"
+                          f"Environment: {environment}\n{label.capitalize()} pipeline UUID: {dlt_pipeline_uuid}\n"
                           f"Event window: {started_at} to {completed_at}\n\n"
                           f"See event_log('{dlt_pipeline_uuid}') for full details."),
                 )
 
             harvested += 1
-        log("EVENT_LOG_HARVEST", f"Harvested {harvested} flow(s) from event log into pipeline_runs")
+        log("EVENT_LOG_HARVEST", f"Harvested {harvested} {label} flow(s) from event log into pipeline_runs")
     except Exception as exc:
-        log("EVENT_LOG_HARVEST", f"could not harvest event log metrics: {exc}", level="WARNING")
-else:
-    log("EVENT_LOG_HARVEST",
-        "dlt_pipeline_uuid not provided — skipping event log metrics harvest "
-        "for bronze/silver (gold will still run, but bronze/silver won't be "
-        "logged to pipeline_runs for this run).", level="WARNING")
-    run_group_id = str(uuid.uuid4())
-    log("EVENT_LOG_HARVEST", f"Using standalone run_group_id for gold-only rows: {run_group_id}")
+        log("EVENT_LOG_HARVEST", f"could not harvest {label} event log metrics: {exc}", level="WARNING")
+    return harvested
+
+# Bronze MUST be harvested before silver — silver's rows_read passthrough
+# reads today_metrics[bronze_table]["written"], populated here.
+_harvest_pipeline(bronze_pipeline_uuid, "bronze")
+_harvest_pipeline(silver_pipeline_uuid, "silver")
 
 
 # COMMAND ----------
@@ -828,61 +853,6 @@ def _create_join_temp_views(layer_config: dict):
         log("GOLD_LAYER", f"Creating join temp view {alias} <- {table}")
         spark.sql(f"CREATE OR REPLACE TEMP VIEW {alias} AS SELECT * FROM {table}")
 
-_MV_HASH_PROP = "framework.definition_hash"
-_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-def _inline_join_sources(query: str, join_sources: list) -> str:
-    """A materialized view can't reference temp views, so join_sources
-    aliases become CTEs of the view's own query instead:
-        WITH <alias> AS (SELECT * FROM <table>) <query>
-    merged into the query's own WITH clause if it already has one."""
-    query = query.strip().rstrip(";").strip()
-    ctes = []
-    for js in join_sources or []:
-        alias, table = js["alias"], js["table_name"]
-        if not _IDENT_RE.match(alias):
-            raise ValueError(f"join_sources alias '{alias}' is not a valid identifier")
-        ctes.append(f"{alias} AS (SELECT * FROM {table})")
-    if not ctes:
-        return query
-    m = re.match(r"(?is)^\s*WITH\s+(?!RECURSIVE\b)", query)
-    if m:
-        return f"WITH {', '.join(ctes)},\n{query[m.end():]}"
-    return f"WITH {', '.join(ctes)}\n{query}"
-
-
-def _run_materialized_view(name: str, target: str, query: str, layer_config: dict):
-    """CREATE OR REPLACE when the view is new or its definition changed;
-    REFRESH (incremental where Databricks can) when it's unchanged. The
-    definition's hash is stored as a table property to tell the two apart."""
-    mv_query = _inline_join_sources(query, layer_config.get("join_sources", []))
-    parts    = layer_config.get("partition_cols") or []
-    digest   = hashlib.sha256(json.dumps({"q": mv_query, "p": parts}).encode()).hexdigest()[:16]
-
-    cat, sch, tbl = target.split(".")
-    rows = spark.sql(f"SELECT table_type FROM {cat}.information_schema.tables "
-                     f"WHERE table_schema = '{sch}' AND table_name = '{tbl}'").collect()
-    exists = bool(rows)
-    is_mv  = exists and (rows[0]["table_type"] or "").upper() == "MATERIALIZED_VIEW"
-    if exists and not is_mv:
-        raise ValueError(f"Gold layer '{name}': {target} exists as {rows[0]['table_type']}, "
-                         f"not a materialized view — drop it first")
-    stored = None
-    if is_mv:
-        stored = next((r["value"] for r in spark.sql(f"SHOW TBLPROPERTIES {target}").collect()
-                       if r["key"] == _MV_HASH_PROP), None)
-
-    if is_mv and stored == digest:
-        log("GOLD_LAYER", f"Materialized view '{target}' unchanged — REFRESH")
-        spark.sql(f"REFRESH MATERIALIZED VIEW {target}")
-    else:
-        log("GOLD_LAYER", f"Materialized view '{target}' "
-            f"{'definition changed' if is_mv else 'is new'} — CREATE OR REPLACE")
-        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {cat}.{sch}")
-        partition = f"PARTITIONED BY ({', '.join(parts)})\n" if parts else ""
-        spark.sql(f"CREATE OR REPLACE MATERIALIZED VIEW {target}\n{partition}"
-                  f"TBLPROPERTIES ('{_MV_HASH_PROP}' = '{digest}')\nAS\n{mv_query}")
-    return {"rows_read": None, "rows_written": None}
 
 def _run_gold_layer(layer_config: dict):
     name            = layer_config["name"]
@@ -894,15 +864,7 @@ def _run_gold_layer(layer_config: dict):
         raise ValueError(f"Gold layer '{name}' has no sql_transform.query in config")
 
     log("GOLD_LAYER", f"Running gold layer '{name}': materialization={materialization}, load_type={load_type}")
-    
-    if materialization == "materialized_view":
-        if load_type != "full":
-            raise ValueError(f"Gold layer '{name}': a materialized view is refreshed from its "
-                            f"query — load_type must be 'full', got '{load_type}'")
-        return _run_materialized_view(name, target, query, layer_config)
-
     _create_join_temp_views(layer_config)
-    
 
     if materialization == "view":
         # Views are always full — no incremental semantics, no physical
@@ -913,15 +875,14 @@ def _run_gold_layer(layer_config: dict):
         spark.sql(f"CREATE OR REPLACE VIEW {target} AS {query}")
         log("GOLD_LAYER", f"View '{target}' created/replaced")
         return {"rows_read": None, "rows_written": None}
-    
-    
-    if materialization == "table":
-        catalog_schema = ".".join(target.split(".")[:2])
-        spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog_schema}")
 
-        df = spark.sql(query)
-        rows_read = df.count()
-        log("GOLD_LAYER", f"Query for '{name}' returned {rows_read} row(s)")
+    # materialization == "table"
+    catalog_schema = ".".join(target.split(".")[:2])
+    spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog_schema}")
+
+    df = spark.sql(query)
+    rows_read = df.count()
+    log("GOLD_LAYER", f"Query for '{name}' returned {rows_read} row(s)")
 
     if load_type == "full":
         log("GOLD_LAYER", f"Full overwrite: writing {rows_read} row(s) to {target}")

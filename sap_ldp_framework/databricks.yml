@@ -5,47 +5,59 @@ include:
   - resources/*.yml
 
 variables:
-  # ── Identity: catalog, schemas, pipeline name, environment ────────────--
+  # ── Identity ─────────────────────────────────────────────────────────
   catalog:
-    description: UC catalog for all output and control tables (used by every notebook)
+    description: UC catalog for all output and control tables
     default: rgaplxdatabricks
-  schema:
-    description: Default schema for the Lakeflow pipeline (bronze target)
-    default: sap_demo_bronze
   control_schema:
-    description: Schema holding pipeline_table_config, sap_metadata_landing, pipeline_alerts
+    description: Schema holding the control tables and the framework volume
     default: uct_demo
+  schema:
+    description: Default schema of the bronze and silver pipelines
+    default: sap_demo_bronze
   pipeline_id:
-    description: pipeline_name value registered in pipeline_table_config
-    default: uct_test_bundle
+    description: pipeline_name registered in pipeline_table_config
+    default: sap_demo_uct
   environment:
-    description: dev | qa | prod — read by every notebook and the pipeline
+    description: dev | qa | prod
     default: dev
+  alert_email:
+    description: Who gets registration alerts (empty = the registry's default list)
+    default: ""
 
-  # ── Paths: three distinct UC Volumes (see README for a mapping table) ─
-  #
-  #  Volume 1 — SAP landing zone       (landing_base_path)
-  #  Volume 2 — Pipeline runtime state  (base_volume)
-  #  Volume 3 — Control / config store  (config_out_dir)
-  #
+  # ── Paths: two locations only ────────────────────────────────────────
+  #  1. SAP landing zone (source data, written by SAP Datasphere / JDBC)
+  #  2. Framework root  (everything the framework itself writes or reads)
+  #       {framework_root}/configs/    generated config JSON
+  #       {framework_root}/sql_files/  gold SQL files
+  #       {framework_root}/logs/       run logs
+  #       {framework_root}/schema/     Auto Loader schema locations
   landing_base_path:
     description: >
-      Volume 1: SAP Datasphere landing zone — raw partfiles and
-      .sap.partfile.metadata. Used only by metadataloader_updated.
+      Landing zone root that pipeline_table_config.source_path is relative
+      to (e.g. source_path PLAF/initial/ -> {landing_base_path}PLAF/initial/).
+      SAP Datasphere and the JDBC extract both write below it.
     default: /Volumes/ingestion_test/landing/landing_volume/
-  base_volume:
-    description: >
-      Volume 2: Lakeflow pipeline runtime — Auto Loader schema checkpoints
-      (schema/), run logs (logs/). Used by sap_lakeflow_pipeline,
-      gold_pipeline, configure_pipeline. NOT where config JSON lives.
-    default: /Volumes/${var.catalog}/temp_source/source_files
+  framework_root:
+    description: One folder for configs, sql_files, logs and schema
+    default: /Volumes/${var.catalog}/${var.control_schema}/landing
+
+  # Kept so existing control jobs keep working; both follow framework_root.
   config_out_dir:
-    description: >
-      Volume 3: Config store — the metadata loader writes pipeline config
-      JSON here; sap_lakeflow_pipeline, gold_pipeline, and
-      configure_pipeline read it. Lives on the control volume
-      ({catalog}.{control_schema}.landing), not on base_volume.
-    default: /Volumes/${var.catalog}/${var.control_schema}/landing/configs
+    description: Always {framework_root}/configs
+    default: ${var.framework_root}/configs
+  base_volume:
+    description: Always {framework_root}
+    default: ${var.framework_root}
+
+  # ── Compute for the JDBC extract (classic job cluster) ───────────────
+  jdbc_spark_version:
+    description: Databricks Runtime for the JDBC extract cluster
+    default: 15.4.x-scala2.12
+  jdbc_node_type:
+    description: VM size for the JDBC extract cluster
+    default: Standard_D4ds_v5
+
 
 targets:
   dev:

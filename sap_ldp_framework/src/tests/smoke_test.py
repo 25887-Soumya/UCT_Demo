@@ -26,9 +26,11 @@ ENVIRONMENT   = param("environment")
 CATALOG       = param("catalog")
 CTRL_SCHEMA   = param("control_schema")
 PIPELINE_NAME = param("pipeline_id")
-BASE_VOLUME   = param("base_volume")
-CONFIG_DIR    = param("config_out_dir")
-PIPELINE_UUID = param("dlt_pipeline_uuid")
+FRAMEWORK_ROOT = (param("framework_root")
+                  or f"/Volumes/{CATALOG}/{CTRL_SCHEMA}/landing").rstrip("/")
+PIPELINES     = {"bronze": param("bronze_pipeline_uuid"),
+                 "silver": param("silver_pipeline_uuid")}
+CONFIG_DIR    = f"{FRAMEWORK_ROOT}/configs"
 
 CTRL = f"{CATALOG}.{CTRL_SCHEMA}"
 
@@ -50,8 +52,8 @@ print(f"Smoke test for target '{EXPECTED_ENV}' | catalog={CATALOG} | pipeline_id
 # COMMAND ----------
 
 # DBTITLE 1,1. Parameters point at the right environment
-if not CATALOG or not CTRL_SCHEMA or not PIPELINE_UUID:
-    fail("parameters", "catalog, control_schema and dlt_pipeline_uuid must all be set")
+if not CATALOG or not CTRL_SCHEMA or not all(PIPELINES.values()):
+    fail("parameters", "catalog, control_schema, bronze_pipeline_uuid and silver_pipeline_uuid must all be set")
 else:
     ok("parameters present")
 
@@ -86,50 +88,56 @@ def can_list(path):
     except Exception as e:
         return False, str(e)[:150]
 
-for label, path in [("runtime volume (base_volume)", BASE_VOLUME),
-                    ("control volume", f"/Volumes/{CATALOG}/{CTRL_SCHEMA}/landing")]:
-    good, err = can_list(path)
-    ok(label, path) if good else fail(label, f"{path}: {err}")
+good, err = can_list(FRAMEWORK_ROOT)
+ok("framework root", FRAMEWORK_ROOT) if good else fail("framework root", f"{FRAMEWORK_ROOT}: {err}")
+
+good, _ = can_list(f"{FRAMEWORK_ROOT}/sql_files")
+ok("sql_files folder", f"{FRAMEWORK_ROOT}/sql_files") if good else warn(
+    "sql_files folder", "not found - upload the gold SQL files")
 
 good, _ = can_list(CONFIG_DIR)
-ok("config folder", CONFIG_DIR) if good else warn(
-    "config folder", f"{CONFIG_DIR} not found yet - run Config_file_generator")
+ok("configs folder", CONFIG_DIR) if good else warn(
+    "configs folder", f"{CONFIG_DIR} not found yet - run Config_file_generator")
 
 # COMMAND ----------
 
-# DBTITLE 1,4. Deployed pipeline is wired to this environment
-try:
-    from databricks.sdk import WorkspaceClient
-    w = WorkspaceClient()
-    p = w.pipelines.get(pipeline_id=PIPELINE_UUID)
-    spec = p.spec
-    conf = spec.configuration or {}
+# DBTITLE 1,4. Deployed bronze and silver pipelines are wired to this environment
+from databricks.sdk import WorkspaceClient
+w = WorkspaceClient()
+expected_conf = {
+    "pipeline_id":    PIPELINE_NAME,
+    "environment":    ENVIRONMENT,
+    "catalog":        CATALOG,
+    "control_schema": CTRL_SCHEMA,
+    "framework_root": FRAMEWORK_ROOT,
+}
+for label, uuid in PIPELINES.items():
+    try:
+        p = w.pipelines.get(pipeline_id=uuid)
+        spec = p.spec
+        conf = spec.configuration or {}
 
-    if spec.catalog == CATALOG:
-        ok("pipeline catalog", spec.catalog)
-    else:
-        fail("pipeline catalog", f"pipeline writes to '{spec.catalog}', expected '{CATALOG}'")
+        if spec.catalog == CATALOG:
+            ok(f"{label} pipeline catalog", spec.catalog)
+        else:
+            fail(f"{label} pipeline catalog", f"writes to '{spec.catalog}', expected '{CATALOG}'")
 
-    checks = {
-        "environment":  ENVIRONMENT,
-        "pipeline_id":  PIPELINE_NAME,
-        "ctrl_schema":  CTRL,
-        "config_out_dir": CONFIG_DIR,
-    }
-    wrong = {k: (conf.get(k), v) for k, v in checks.items() if conf.get(k) != v}
-    if wrong:
-        fail("pipeline configuration",
-             "; ".join(f"{k}={got!r} (expected {exp!r})" for k, (got, exp) in wrong.items()))
-    else:
-        ok("pipeline configuration", "environment, pipeline_id, ctrl_schema, config_out_dir")
+        wrong = {k: (conf.get(k, "").rstrip("/") if k == "framework_root" else conf.get(k), v)
+                 for k, v in expected_conf.items()}
+        wrong = {k: gv for k, gv in wrong.items() if gv[0] != gv[1]}
+        if wrong:
+            fail(f"{label} pipeline configuration",
+                 "; ".join(f"{k}={got!r} (expected {exp!r})" for k, (got, exp) in wrong.items()))
+        else:
+            ok(f"{label} pipeline configuration", ", ".join(expected_conf))
 
-    last = (p.latest_updates or [None])[0]
-    if last is not None and str(getattr(last, "state", "")).endswith("FAILED"):
-        warn("last pipeline update", f"most recent update {last.update_id} FAILED")
-    else:
-        ok("last pipeline update", str(getattr(last, "state", "no runs yet")))
-except Exception as e:
-    fail("pipeline lookup", f"{PIPELINE_UUID}: {str(e)[:200]}")
+        last = (p.latest_updates or [None])[0]
+        if last is not None and str(getattr(last, "state", "")).endswith("FAILED"):
+            warn(f"{label} last update", f"most recent update {last.update_id} FAILED")
+        else:
+            ok(f"{label} last update", str(getattr(last, "state", "no runs yet")))
+    except Exception as e:
+        fail(f"{label} pipeline lookup", f"{uuid}: {str(e)[:200]}")
 
 # COMMAND ----------
 
@@ -160,7 +168,7 @@ else:
                 warn("silver table", f"{silver} not created yet - run the main job")
         sql_file = d.get("gold_sql_file")
         if sql_file:
-            path = f"/Volumes/{CATALOG}/{CTRL_SCHEMA}/landing/sql_files/{sql_file}"
+            path = f"{FRAMEWORK_ROOT}/sql_files/{sql_file}"
             good, _ = can_list(path)
             ok("gold SQL file", path) if good else fail(
                 "gold SQL file", f"{path} is registered but missing - the gold step would fail")

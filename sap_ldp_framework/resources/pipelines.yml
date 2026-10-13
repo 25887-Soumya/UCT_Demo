@@ -1,0 +1,45 @@
+# Bronze (landing -> bronze, Auto Loader) and silver (bronze -> silver)
+# Lakeflow pipelines. Replaces the single pipeline in pipeline.yml.
+#
+# Both pipelines read the same five values from their Configuration.
+# Paths are derived from framework_root inside the notebooks:
+#   {framework_root}/configs, /sql_files, /logs, /schema
+resources:
+  pipelines:
+    bronze_pipeline:
+      name: SAP Bronze Pipeline (${bundle.target})
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      continuous: false
+      root_path: ../src/pipeline
+      configuration:
+        pipeline_id: ${var.pipeline_id}
+        environment: ${var.environment}
+        catalog: ${var.catalog}
+        control_schema: ${var.control_schema}
+        framework_root: ${var.framework_root}
+      libraries:
+        - notebook:
+            path: ../src/pipeline/bronze_pipeline.py
+
+    silver_pipeline:
+      name: SAP Silver Pipeline (${bundle.target})
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      photon: true
+      channel: CURRENT
+      continuous: false
+      root_path: ../src/pipeline
+      configuration:
+        pipeline_id: ${var.pipeline_id}
+        environment: ${var.environment}
+        catalog: ${var.catalog}
+        control_schema: ${var.control_schema}
+        framework_root: ${var.framework_root}
+      libraries:
+        - notebook:
+            path: ../src/pipeline/silver_pipeline.py

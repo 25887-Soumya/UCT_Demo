@@ -1,17 +1,22 @@
 # Databricks notebook source
-# MAGIC %run ./read_sap_metadata_ingestion
+# /// script
+# [tool.databricks.environment]
+# environment_version = "5"
+# dependencies = [
+#   "openpyxl",
+# ]
+# ///
+# MAGIC %pip install openpyxl
 
 # COMMAND ----------
 
-# MAGIC %run ./pipeline_register
+# dbutils.library.restartPython()
 
 # COMMAND ----------
-
 
 from collections import defaultdict
 import json
 import logging
-import re
 import uuid
 from datetime import datetime
 
@@ -22,73 +27,39 @@ if not logger.handlers:
     _h.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     logger.addHandler(_h)
 
-# ── Defaults (overridable via widgets) ──────────────────────────
-DEFAULT_CATALOG        = "rgaplxdatabricks"
-DEFAULT_CONTROL_SCHEMA = "uct_demo"
-DEFAULT_LANDING_BASE   = "/Volumes/ingestion_test/landing/landing_volume/"
+# Set from the framework_root parameter in the "Environment parameters"
+# cell (framework_root/sql_files and framework_root/configs).
+BASE_VOLUME = None
+CONFIG_DIR  = None
 
-# FIX (ported from the Excel orchestrator): don't let widget registration
-# itself take the whole notebook down if it's being run somewhere widgets
-# behave unexpectedly (e.g. re-run in an interactive cell). Fall back to
-# safe defaults rather than raising before we've even started.
-try:
-    dbutils.widgets.text("environment", "dev", "Environment")
-    dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
-    dbutils.widgets.text("catalog", DEFAULT_CATALOG, "Target Catalog")
-    dbutils.widgets.text("control_schema", DEFAULT_CONTROL_SCHEMA,
-                         "Control Schema (pipeline_table_config lives here)")
-    dbutils.widgets.text("landing_base_path", DEFAULT_LANDING_BASE,
-                         "SAP Landing Base Path")
-    ENVIRONMENT       = (dbutils.widgets.get("environment") or "dev").strip().lower()
-    PIPELINE_NAME     = (dbutils.widgets.get("pipeline_name") or "").strip()
-    CATALOG           = (dbutils.widgets.get("catalog") or DEFAULT_CATALOG).strip()
-    CONTROL_SCHEMA    = (dbutils.widgets.get("control_schema") or DEFAULT_CONTROL_SCHEMA).strip()
-    LANDING_BASE_PATH = (dbutils.widgets.get("landing_base_path") or DEFAULT_LANDING_BASE).strip()
-except Exception:
-    ENVIRONMENT       = "dev"
-    PIPELINE_NAME     = ""
-    CATALOG           = DEFAULT_CATALOG
-    CONTROL_SCHEMA    = DEFAULT_CONTROL_SCHEMA
-    LANDING_BASE_PATH = DEFAULT_LANDING_BASE
+dbutils.widgets.text("environment", "dev", "Environment")
+dbutils.widgets.text("pipeline_name", "", "Pipeline Name")
+# OPTIONAL: path to the onboarding Excel (sap_onboard_template.xlsx). If set, its
+# rows for this pipeline_name are upserted into pipeline_table_config before the
+# config is generated. If EMPTY, nothing changes — rows are read from
+# pipeline_table_config exactly as before.
+dbutils.widgets.text("template_path", "", "Template Path (Excel .xlsx or .csv, optional)")
 
-# ── Derived constants (no more hardcoded catalog or paths) ──────
-BASE_VOLUME          = f"/Volumes/{CATALOG}/{CONTROL_SCHEMA}/landing"
-DEFAULT_CONFIG_TABLE = f"{CATALOG}.{CONTROL_SCHEMA}.pipeline_table_config"
-CONFIG_TABLE         = DEFAULT_CONFIG_TABLE
-CONFIG_DIR           = f"{BASE_VOLUME}/configs"
+ENVIRONMENT   = dbutils.widgets.get("environment").strip().lower()
+PIPELINE_NAME = dbutils.widgets.get("pipeline_name").strip()
+TEMPLATE_PATH = dbutils.widgets.get("template_path").strip()
 
-# Override the CTRL variable that pipeline_register set as a default during
-# %run — now it uses the widget-resolved catalog and control_schema.
-CTRL = f"{CATALOG}.{CONTROL_SCHEMA}"
+logger.info(f"Widgets resolved -> environment={ENVIRONMENT!r}  pipeline_name={PIPELINE_NAME!r}  "
+            f"template_path={TEMPLATE_PATH!r}")
 
-# Override the CTRL variable that pipeline_register set with its hardcoded
-# default — from this point forward every SQL referencing {CTRL}.table will
-# use the widget-derived catalog and schema.
-CTRL = f"{CATALOG}.{CONTROL_SCHEMA}"
+# COMMAND ----------
 
-logger.info(f"Widgets resolved -> environment={ENVIRONMENT!r}  "
-            f"pipeline_name={PIPELINE_NAME!r}  catalog={CATALOG!r}  "
-            f"control_schema={CONTROL_SCHEMA!r}  landing_base_path={LANDING_BASE_PATH!r}")
+# MAGIC %run ./pipeline_registry
 
-# NOTE: the `%run ./pipeline_registry` / `%run ./read_sap_metadata` lines that
-# used to sit here were removed — %run must be the only thing in its cell,
-# and inside a Python cell it's a syntax error. The %run cells at the top of
-# this notebook are the ones that actually load those dependencies.
+# COMMAND ----------
 
-# FIX (ported from the Excel orchestrator): this notebook is glued together
-# by the %run cells above, which inject CTRL / PipelineRegistry /
-# read_sap_metadata / VALID_SOURCE_LOAD_TYPES into the global namespace.
-# That's fine as a notebook, but it fails silently and unhelpfully if the
-# cells run out of order or this file ever gets imported as a plain module.
-# Fail loud, immediately, with a message that names the actual cause.
-for _dep in ("CTRL", "PipelineRegistry", "read_sap_metadata", "VALID_SOURCE_LOAD_TYPES"):
-    if _dep not in globals():
-        raise RuntimeError(
-            f"'{_dep}' is not defined. This file depends on `%run ./read_sap_metadata_ingestion` "
-            f"and `%run ./pipeline_register` executing first, as notebook "
-            f"cells above. If you're running this outside a notebook, add explicit "
-            f"imports instead of relying on %run."
-        )
+# MAGIC %run ./read_sap_metadata
+
+# COMMAND ----------
+
+# MAGIC %run ./read_sql_server_metadata
+
+# COMMAND ----------
 
 if not PIPELINE_NAME:
     raise ValueError(
@@ -96,41 +67,18 @@ if not PIPELINE_NAME:
         "value present in pipeline_table_config."
     )
 
-if ENVIRONMENT not in ("dev", "qa", "prod"):
-    raise ValueError(f"environment widget must be dev|qa|prod — got '{ENVIRONMENT}'")
+# Landing zone for SAP DSP exports. Metadata_path is no longer a template
+# column — it is always derived from this base + Table_name. Source_path
+# values in the template are relative to this same base (one or more,
+# comma-separated); each is prefixed with LANDING_BASE_PATH before use.
+LANDING_BASE_PATH = None   # set from the landing_base_path parameter ("Environment parameters" cell)
 
-if len(CONFIG_TABLE.split(".")) != 3:
-    raise ValueError(
-        f"Derived CONFIG_TABLE must be fully qualified (catalog.schema.table) — got '{CONFIG_TABLE}'"
-    )
+# CTRL and VALID_*_LOAD_TYPES come from pipeline_registry.py via
+# `%run ./pipeline_registry` (see COMMAND cell at top of this notebook).
+# VALID_SOURCE_LOAD_TYPES = {"full", "scd1", "scd2", "delta", "delta_merge"}
 
-# Landing zone for SAP DSP exports. Metadata_path is not a template column —
-# it is always derived from this base + Table_name. Source_path values in
-# the template are relative to this same base (one or more, comma-separated);
-# each is prefixed with LANDING_BASE_PATH before use.
-# (LANDING_BASE_PATH is now set from the landing_base_path widget above.)
+PIPELINE_TABLE_CONFIG = f"{CTRL}.pipeline_table_config"
 
-
-
-
-
-
-# Config rows now come from the Delta table, not an Excel file in a Volume.
-# (CTRL is still used for sap_metadata_landing — that table did not move.)
-PIPELINE_TABLE_CONFIG = CONFIG_TABLE
-
-# FIX (ported from the Excel orchestrator): the exact bug class this whole
-# pipeline has been chasing — a human typing a bare flag value ("D") into a
-# cell that's supposed to hold a full SQL condition. Require an operator
-# before we'll trust an override; otherwise fall back to the
-# SAP-metadata-derived condition instead of silently forwarding something
-# that will break at pipeline-run time, several steps removed from where
-# the mistake was made.
-_CONDITION_OPERATOR_RE = re.compile(r"(=|!=|<>|\bLIKE\b|\bIS\b)", re.IGNORECASE)
-
-
-def _looks_like_sql_condition(val: str) -> bool:
-    return bool(_CONDITION_OPERATOR_RE.search(val))
 
 
 def _resolve_landing_paths(row: dict) -> dict:
@@ -146,8 +94,8 @@ def _resolve_landing_paths(row: dict) -> dict:
       comma-joined absolute paths.
 
       e.g. Table_name=Z_MARA_CDS_NEW, Source_path=Z_MARA_CDS_NEW/initial/
-        -> Metadata_path = /Volumes/ingestion_cat/landing/landing_volume/DEMO/Z_MARA_CDS_NEW/.sap.partfile.metadata
-        -> Source_path   = /Volumes/ingestion_cat/landing/landing_volume/DEMO/Z_MARA_CDS_NEW/initial/
+        -> Metadata_path = {LANDING_BASE_PATH}Z_MARA_CDS_NEW/.sap.partfile.metadata
+        -> Source_path   = {LANDING_BASE_PATH}Z_MARA_CDS_NEW/initial/
     """
     base = LANDING_BASE_PATH.rstrip("/")
 
@@ -161,6 +109,37 @@ def _resolve_landing_paths(row: dict) -> dict:
         row["Source_path"] = ",".join(f"{base}/{p}" for p in parts)
 
     return row
+
+
+def _read_metadata_for_source(source: dict) -> dict:
+    """
+    Dispatches to the right metadata reader based on this row's
+    Connection_name:
+      ""  / "SAP"         -> read_sap_metadata(Metadata_path)   (default,
+                              unchanged — every existing row with no
+                              Connection_name set keeps working exactly
+                              as before)
+      "SQL_SERVER"        -> read_sql_server_metadata(Table_name, Connection_name)
+      anything else       -> raises; not yet a recognized source type
+    Returns the same dict shape either way — format, load_type, columns,
+    primary_keys, key_str, watermark, operation_col, sequence_col,
+    soft_delete_condition, schema_hints — so every caller below is
+    unaffected by which reader actually ran.
+    """
+    table_name      = str(source.get("Table_name", "")).strip()
+    connection_name = str(source.get("Connection_name", "")).strip()
+    conn_upper      = connection_name.upper()
+
+    if conn_upper in ("", "SAP"):
+        metadata_path = str(source["Metadata_path"]).strip()
+        return read_sap_metadata(metadata_path)
+    elif conn_upper == "SQL_SERVER":
+        return read_sql_server_metadata(table_name, connection_name)
+    else:
+        raise ValueError(
+            f"'{table_name}': Connection_name='{connection_name}' is not a "
+            f"recognized source type — expected blank/'SAP' or 'SQL_SERVER'."
+        )
 
 
 def _truthy(val, default=True):
@@ -179,6 +158,217 @@ def _sql_quote(val) -> str:
     if val is None or val == "":
         return "null"
     return f"'{str(val).replace(chr(39), chr(39) * 2)}'"
+
+
+# ── Excel template -> pipeline_table_config ─────────────────────────────────
+# Replacement for the load_pipeline_table_config widget notebook: same columns,
+# same MERGE semantics (key = pipeline_name + table_name), but values come from
+# an Excel sheet instead of widgets. Only runs when the template_path widget is
+# non-empty.
+
+_TEMPLATE_COLUMNS = [
+    "pipeline_name", "table_name", "source_path", "bronze_schema",
+    "silver_schema", "gold_schema", "silver_table", "gold_view",
+    "load_type", "soft_delete_condition", "is_active",
+    "gold_sql_file", "depends_on_silvers",
+    "skip_source_to_landing", "connection_name",
+    "watermark_col", "operation_col", "sequence_col",
+]
+_TEMPLATE_REQUIRED  = ["pipeline_name", "table_name", "source_path",
+                       "bronze_schema", "silver_schema", "gold_schema"]
+_TEMPLATE_BOOLEANS  = {"is_active": True, "skip_source_to_landing": False}   # col -> default
+_TEMPLATE_NULLABLE  = ["soft_delete_condition", "connection_name",
+                       "gold_sql_file", "depends_on_silvers",
+                       "watermark_col", "operation_col", "sequence_col"]     # blank -> NULL
+
+
+def _cell_to_str(v) -> str:
+    if v is None:
+        return ""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    s = str(v).strip()
+    # Users often type the literal word null/none in a cell meaning "blank".
+    return "" if s.lower() in ("null", "none", "nan") else s
+
+
+def _read_csv_rows(path: str) -> list:
+    """All rows of a CSV template as tuples. Handles the UTF-8 byte-order mark
+    Excel adds on "CSV UTF-8" export, and comma, semicolon or tab separators
+    (Excel uses ";" in many European locales)."""
+    import csv
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        sample = fh.read(4096)
+        fh.seek(0)
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+        except csv.Error:
+            dialect = csv.excel                       # plain comma-separated
+        return [tuple(r) for r in csv.reader(fh, dialect)]
+
+
+def _read_template_rows(template_path: str, pipeline_name: str) -> list:
+    """Read the template - first sheet of an Excel workbook (.xlsx/.xlsm) or
+    a CSV file (.csv) with the same columns; return cleaned row dicts
+    (lower-case column names) for exactly this pipeline_name."""
+    import os
+
+    path = template_path[5:] if template_path.startswith("dbfs:/") else template_path
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"template_path widget is set but the file was not found: {template_path!r}")
+
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".csv":
+        all_rows = _read_csv_rows(path)
+        ws = type("CsvSheet", (), {"title": "csv"})()   # for the messages below
+    elif ext in (".xlsx", ".xlsm"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True, read_only=True)
+        ws = wb.worksheets[0]
+        all_rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    else:
+        raise ValueError(
+            f"Template '{template_path}': unsupported file type '{ext or '(none)'}'. "
+            f"Use .xlsx, .xlsm or .csv (save an old .xls as .xlsx first).")
+    if not all_rows:
+        raise ValueError(f"Template '{template_path}' is empty.")
+
+    header = [_cell_to_str(h).lower() for h in all_rows[0]]
+    missing = [c for c in _TEMPLATE_REQUIRED if c not in header]
+    if missing:
+        raise ValueError(
+            f"Template '{template_path}' (sheet '{ws.title}') is missing required "
+            f"column header(s): {missing}. Found: {[h for h in header if h]}")
+    unknown = [h for h in header if h and h not in _TEMPLATE_COLUMNS]
+    if unknown:
+        logger.warning(f"  Template: ignoring unrecognized column(s): {unknown}")
+
+    parsed, seen_pipelines = [], set()
+    for excel_row_no, values in enumerate(all_rows[1:], start=2):
+        rec = {h: _cell_to_str(v) for h, v in zip(header, values) if h in _TEMPLATE_COLUMNS}
+        if not any(rec.values()):
+            continue                                   # fully blank row
+        seen_pipelines.add(rec.get("pipeline_name", ""))
+        if rec.get("pipeline_name", "") != pipeline_name:
+            continue                                   # another pipeline's row
+        rec["_row"] = excel_row_no
+        parsed.append(rec)
+
+    if not parsed:
+        raise ValueError(
+            f"Template '{template_path}' has no rows for pipeline_name="
+            f"'{pipeline_name}'. pipeline_name values found: "
+            f"{sorted(p for p in seen_pipelines if p)}")
+    return parsed
+
+
+def load_template_into_pipeline_table_config(spark, template_path: str, pipeline_name: str) -> int:
+    """
+    Upsert this pipeline's Excel rows into {PIPELINE_TABLE_CONFIG}
+    (MERGE on pipeline_name + table_name — identical to
+    load_pipeline_table_config.sql). Returns the number of rows merged.
+    Rows already in the table but absent from the Excel are left untouched
+    (use is_active=false in the Excel to switch a table off).
+    """
+    from pyspark.sql.types import StructType, StructField, StringType, BooleanType
+
+    rows = _read_template_rows(template_path, pipeline_name)
+
+    clean, seen_tables = [], {}
+    for rec in rows:
+        rn = rec["_row"]
+        blanks = [c for c in _TEMPLATE_REQUIRED if not rec.get(c)]
+        if blanks:
+            raise ValueError(f"Template row {rn}: required column(s) empty: {blanks}")
+
+        table_name = rec["table_name"]
+        if table_name in seen_tables:
+            raise ValueError(
+                f"Template rows {seen_tables[table_name]} and {rn}: duplicate "
+                f"table_name '{table_name}' for pipeline '{pipeline_name}'. "
+                f"Use one row per table (point source_path at the shared parent "
+                f"folder, or comma-separate multiple paths).")
+        seen_tables[table_name] = rn
+
+        load_type = (rec.get("load_type") or "full").lower()
+        if load_type not in VALID_SOURCE_LOAD_TYPES:
+            raise ValueError(
+                f"Template row {rn} ('{table_name}'): load_type must be one of "
+                f"{sorted(VALID_SOURCE_LOAD_TYPES)} — got '{load_type}'")
+
+        out = {c: rec.get(c, "") for c in _TEMPLATE_COLUMNS}
+        out["load_type"] = load_type
+        for c in _TEMPLATE_NULLABLE:
+            out[c] = out[c] or None
+        for c, default in _TEMPLATE_BOOLEANS.items():
+            raw = rec.get(c, "")
+            if raw == "":
+                out[c] = default
+            else:
+                v = raw.strip().lower()
+                if v in ("true", "yes", "y", "1"):
+                    out[c] = True
+                elif v in ("false", "no", "n", "0"):
+                    out[c] = False
+                else:
+                    raise ValueError(
+                        f"Template row {rn} ('{table_name}'): {c} must be true/false — got '{raw}'")
+        # blank (not NULL) for optional name columns, same as the widget SQL
+        out["silver_table"] = out["silver_table"] or ""
+        out["gold_view"]    = out["gold_view"] or ""
+        clean.append(out)
+
+    schema = StructType([
+        StructField(c, BooleanType() if c in _TEMPLATE_BOOLEANS else StringType(), True)
+        for c in _TEMPLATE_COLUMNS
+    ])
+    spark.createDataFrame([tuple(r[c] for c in _TEMPLATE_COLUMNS) for r in clean], schema) \
+         .createOrReplaceTempView("_template_pipeline_rows")
+
+    # Only merge columns that actually exist in the target table (matched
+    # case-insensitively), so an older table without e.g. gold_sql_file still works.
+    tgt_by_lower = {c.lower(): c for c in spark.table(PIPELINE_TABLE_CONFIG).columns}
+    skipped = [c for c in _TEMPLATE_COLUMNS if c not in tgt_by_lower]
+    if skipped:
+        logger.warning(f"  {PIPELINE_TABLE_CONFIG} has no column(s) {skipped} — "
+                       f"those Excel values are NOT loaded.")
+    use_cols = [c for c in _TEMPLATE_COLUMNS if c in tgt_by_lower]
+    non_key = [c for c in use_cols if c not in ("pipeline_name", "table_name")]
+    set_clause = ",\n                ".join(f"target.{tgt_by_lower[c]} = source.{c}" for c in non_key)
+    cols_csv   = ", ".join(tgt_by_lower[c] for c in use_cols)
+    vals_csv   = ", ".join(f"source.{c}" for c in use_cols)
+
+    spark.sql(f"""
+        MERGE INTO {PIPELINE_TABLE_CONFIG} AS target
+        USING _template_pipeline_rows AS source
+        ON  target.pipeline_name = source.pipeline_name
+        AND target.table_name    = source.table_name
+        WHEN MATCHED THEN UPDATE SET
+                {set_clause}
+        WHEN NOT MATCHED THEN INSERT ({cols_csv}) VALUES ({vals_csv})
+    """)
+
+    # Heads-up for rows left behind in the table that the Excel no longer lists.
+    try:
+        in_table = {r["table_name"] for r in spark.sql(
+            f"SELECT table_name FROM {PIPELINE_TABLE_CONFIG} "
+            f"WHERE pipeline_name = {_sql_quote(pipeline_name)}").collect()}
+        stale = sorted(in_table - set(seen_tables))
+        if stale:
+            logger.warning(
+                f"  {len(stale)} table(s) exist in {PIPELINE_TABLE_CONFIG} for "
+                f"'{pipeline_name}' but not in the Excel: {stale} — they will "
+                f"STILL be generated. Set is_active=false in the Excel to skip them.")
+    except Exception as exc:
+        logger.warning(f"  Could not check for stale rows: {exc}")
+
+    logger.info(f"Template: merged {len(clean)} row(s) for pipeline_name='{pipeline_name}' "
+                f"from {template_path} into {PIPELINE_TABLE_CONFIG}")
+    return len(clean)
 
 
 # ── Step 0: land raw SAP metadata BEFORE any pipeline registration ─────────
@@ -363,19 +553,13 @@ def _collapse_initial_delta_duplicates(pipeline_name: str, group_rows: list) -> 
 
 def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
     """
-    Read rows for exactly one pipeline from the Delta config table
-    (PIPELINE_TABLE_CONFIG, default rgaplxdatabricks.uct_demo.pipeline_table_config)
-    and register that single pipeline. The Excel template is no longer read
-    anywhere; the config-entry notebook MERGEs widget values into this table,
-    one row per (pipeline_name, table_name).
+    Read rows for exactly one pipeline from
+    {PIPELINE_TABLE_CONFIG} (same column
+    structure the old Excel template had — the Excel file is no longer
+    read anywhere; a separate job loads user-provided widget values
+    straight into this Delta table) and register that single pipeline.
 
-    Column names are matched case-insensitively (the table uses lower_case,
-    the code below uses Title_Case). Required columns: pipeline_name,
-    table_name, source_path, load_type. Optional columns (merge_keys,
-    watermark, format, join_silvers) may be absent from the table — they
-    then read as empty and the SAP-metadata-derived defaults apply.
-
-    Columns (same meaning as the old Excel template):
+    Columns (identical meaning to the old Excel template):
       Pipeline_name           -> filtered on directly in the SQL query below;
                                   every row returned belongs to this one pipeline
       Table_name               -> source entity name
@@ -417,24 +601,17 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
       Watermark                          -> auto-detected from .sap.partfile.metadata
                                              (semanticType=_change_mode + TIMESTAMP -> __timestamp)
                                              table column overrides if provided
-      Soft_delete_condition               -> apply_as_deletes expr (scd2 only). Must contain
-                                              a real SQL operator (=, !=, <>, LIKE, IS) — a
-                                              bare value like "D" is rejected with a warning
-                                              and the SAP-metadata-derived condition is used
-                                              instead (see _looks_like_sql_condition).
+      Soft_delete_condition               -> apply_as_deletes expr (scd2 only)
       Is_active                            -> True/False, skip row if False
       Format                                -> optional override (else from metadata file)
 
       Gold_view                              -> name of the gold VIEW for this row's table.
                                                  Gold is VIEW-ONLY — there is no materialized
-                                                 gold table option (this may change — the
-                                                 table-vs-view question for DLT-native
-                                                 Materialized Views / Streaming Tables is still
-                                                 open). A view has no physical storage: it's a
-                                                 plain `CREATE OR REPLACE VIEW` re-pointed at
-                                                 current silver on every run, so there's no
-                                                 load_type/merge_keys/watermark to configure
-                                                 for it — it's always a full re-read.
+                                                 gold table option. A view has no physical
+                                                 storage: it's a plain `CREATE OR REPLACE VIEW`
+                                                 re-pointed at current silver on every run, so
+                                                 there's no load_type/merge_keys/watermark to
+                                                 configure for it — it's always a full re-read.
       Gold_sql_file                          -> optional. Filename of a .sql file under
                                                  {BASE_VOLUME}/sql_files/<Gold_sql_file>
                                                  holding the view's SELECT body. If blank (and
@@ -442,44 +619,33 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                                                  straight passthrough of this row's own silver:
                                                  "SELECT * FROM {silver_table}".
                                                  If given, the SQL file's text is used as-is,
-                                                 with exactly one auto-substitution: the literal
+                                                 with exactly one substitution: the literal
                                                  placeholder "{silver_table}" is replaced with
                                                  THIS row's own silver table, fully qualified
-                                                 (rgaplxdatabricks.{Silver_schema}.
-                                                 {Pipeline_name}_{Silver_table}_silver). If the
-                                                 placeholder isn't found in the file, a warning
-                                                 is logged rather than silently shipping a gold
-                                                 object with no primary silver reference.
-      Join_Silvers                           -> optional comma list of OTHER silver names
-                                                 (from other rows in this same pipeline) that
-                                                 Gold_sql_file's SQL joins against. Only
-                                                 meaningful alongside Gold_sql_file — a plain
-                                                 passthrough view has nothing to join. Each
-                                                 name gets a short alias (underscores stripped,
-                                                 truncated to 12 chars — e.g. "customer_dim"
-                                                 -> "customerdim") that YOU must use verbatim
-                                                 in the .sql file's JOIN clause; nothing here
-                                                 checks that your SQL text and the generated
-                                                 alias actually agree, and a collision between
-                                                 two names' generated aliases is logged as a
-                                                 warning, not blocked. This only registers which
-                                                 tables exist under which aliases — it does NOT
-                                                 write the JOIN/ON clause or any WHERE filter
-                                                 for you.
+                                                 ({TARGET_CATALOG}.{Silver_schema}.
+                                                 {Pipeline_name}_{Silver_table}_silver).
+                                                 Any OTHER silver tables the SQL joins against
+                                                 are NOT auto-substituted or aliased — write
+                                                 their fully-qualified names directly
+                                                 (hardcoded) in the SQL file, e.g.
+                                                 "<catalog>.sap_demo_silver.
+                                                 sap_demo_uct_marc_silver_silver". This keeps
+                                                 the SQL file self-contained and readable by
+                                                 anyone without needing to know the alias
+                                                 mapping.
       Depends_on_silvers                     -> optional comma list of silver names this SQL
                                                  file references, in order (first is normally
                                                  this row's own silver, matching {silver_table}).
                                                  Informational only — used for the lineage
                                                  trail in pipeline_definitions.depends_on. It
-                                                 does NOT drive any substitution, aliasing, or
-                                                 ordering — that's what Join_Silvers is for.
-                                                 gold_pipeline.py always runs after the ENTIRE
-                                                 bronze/silver Lakeflow pipeline has completed,
-                                                 so every silver a gold SQL file might reference
-                                                 already exists by the time any gold view is
-                                                 (re)created — there's nothing to wait on. If
-                                                 omitted, defaults to just this row's own
-                                                 Silver_table.
+                                                 does NOT drive any substitution or ordering:
+                                                 gold_pipeline.py always runs after the
+                                                 ENTIRE bronze/silver Lakeflow pipeline has
+                                                 completed, so every silver a gold SQL file
+                                                 might reference already exists by the time any
+                                                 gold view is (re)created — there's nothing to
+                                                 wait on. If omitted, defaults to just this
+                                                 row's own Silver_table.
     """
 
     pipeline_name = (pipeline_name or "").strip()
@@ -487,25 +653,8 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
         raise ValueError("load_sap_pipeline_from_table: pipeline_name is required")
 
     q = _sql_quote
-    if not spark.catalog.tableExists(PIPELINE_TABLE_CONFIG):
-        raise ValueError(
-            f"Config table {PIPELINE_TABLE_CONFIG} does not exist or is not "
-            f"accessible — check the config_table widget and your grants."
-        )
-
-    # Record which Delta version of the config was used, so a registered
-    # pipeline config can always be traced back to the exact config rows
-    # (SELECT * FROM <table> VERSION AS OF <n>).
-    try:
-        config_version = spark.sql(
-            f"DESCRIBE HISTORY {PIPELINE_TABLE_CONFIG} LIMIT 1"
-        ).collect()[0]["version"]
-        logger.info(f"Reading {PIPELINE_TABLE_CONFIG} at Delta version {config_version}")
-    except Exception:
-        config_version = None
-
     df = spark.sql(
-        f"SELECT * FROM {PIPELINE_TABLE_CONFIG} WHERE pipeline_name = {q(pipeline_name)}"
+        f"SELECT * FROM {PIPELINE_TABLE_CONFIG} WHERE Pipeline_name = {q(pipeline_name)}"
     )
 
     # Normalize column names to the canonical Title_Case the rest of this
@@ -526,22 +675,18 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
         "Bronze_schema", "Silver_schema", "Gold_schema",
         "Silver_table", "Load_type", "Merge_keys", "Watermark",
         "Soft_delete_condition", "Is_active", "Format",
-        "Gold_sql_file", "Gold_view", "Join_Silvers", "Depends_on_silvers",
+        "Gold_sql_file", "Gold_view", "Depends_on_silvers",
+        "Connection_name",   # NEW — "" or "SAP" = .sap.partfile.metadata (default,
+                              # unchanged behavior); "SQL_SERVER" = JDBC/INFORMATION_SCHEMA
+                              # via read_sql_server_metadata() — see _read_metadata_for_source()
     ]
-    REQUIRED_COLUMNS = {"Pipeline_name", "Table_name", "Source_path", "Load_type"}
     actual_by_lower = {c.lower(): c for c in df.columns}
     unmatched = [c for c in CANONICAL_COLUMNS if c.lower() not in actual_by_lower]
-    missing_required = [c for c in unmatched if c in REQUIRED_COLUMNS]
-    if missing_required:
-        raise ValueError(
-            f"{PIPELINE_TABLE_CONFIG} is missing required column(s) "
-            f"{missing_required}. Actual columns: {df.columns}"
-        )
-    missing_optional = [c for c in unmatched if c not in REQUIRED_COLUMNS]
-    if missing_optional:
-        logger.info(
-            f"  {PIPELINE_TABLE_CONFIG} has no column(s) {missing_optional} — "
-            f"they read as empty for every row (SAP-metadata defaults apply)."
+    if unmatched:
+        logger.warning(
+            f"  {PIPELINE_TABLE_CONFIG} is missing expected column(s) "
+            f"(case-insensitive match): {unmatched} — those fields will "
+            f"read as empty/default for every row."
         )
 
     rows = []
@@ -568,13 +713,6 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
     # Metadata_path is no longer read from the template; Source_path is
     # resolved from relative (possibly comma-separated) to absolute here,
     # before any filtering/grouping/collapsing below.
-    for row in rows:
-        if _truthy(row.get("Is_active"), default=True) and not row["Source_path"].strip():
-            raise ValueError(
-                f"'{row['Table_name']}': source_path is empty in {PIPELINE_TABLE_CONFIG}. "
-                f"Set it via the config-entry notebook."
-            )
-
     rows = [_resolve_landing_paths(row) for row in rows]
 
     # ── Filter active rows ──────────────────────────────────
@@ -585,8 +723,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
         if not is_active:
             logger.info(f"  SKIPPED (Is_active=False) : {table_name}")
             continue
-        load_type = (str(row.get("Load_type") or "").strip() or "full").lower()
-        row["Load_type"] = load_type
+        load_type = str(row.get("Load_type", "full")).strip().lower()
         if load_type not in VALID_SOURCE_LOAD_TYPES:
             raise ValueError(
                 f"'{table_name}': Load_type must be one of "
@@ -636,9 +773,8 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
     landed_meta = {}   # (pipeline_name, table_name) -> meta dict, reused below
     for pipeline_name, group_rows in groups.items():
         for source in group_rows:
-            table_name    = str(source["Table_name"]).strip()
-            metadata_path = str(source["Metadata_path"]).strip()
-            meta = read_sap_metadata(metadata_path)
+            table_name = str(source["Table_name"]).strip()
+            meta = _read_metadata_for_source(source)
             landed_meta[(pipeline_name, table_name)] = meta
             _land_sap_metadata(spark, pipeline_name, source, meta)
 
@@ -653,98 +789,79 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
 
         # Schemas — taken from first row of the group
         first = group_rows[0]
-        # `or` rather than .get(key, default): every canonical key is always
-        # present (as "" when the column is NULL), so .get's default never fired.
-        bronze_schema = str(first.get("Bronze_schema") or "").strip() or "sap_demo_bronze"
-        silver_schema = str(first.get("Silver_schema") or "").strip() or "sap_demo_silver"
-        gold_schema   = str(first.get("Gold_schema")   or "").strip() or "sap_demo_gold"
-
-        # Schemas are pipeline-level but stored per row — warn if rows disagree
-        # instead of silently using the first row's values.
-        for col, chosen in (("Bronze_schema", bronze_schema),
-                            ("Silver_schema", silver_schema),
-                            ("Gold_schema",   gold_schema)):
-            others = {str(r.get(col) or "").strip() for r in group_rows} - {"", chosen}
-            if others:
-                logger.warning(
-                    f"  {col} differs across rows of '{pipeline_name}': using "
-                    f"'{chosen}', ignoring {sorted(others)}"
-                )
+        bronze_schema = str(first.get("Bronze_schema", "sap_demo_bronze")).strip()
+        silver_schema = str(first.get("Silver_schema", "sap_demo_silver")).strip()
+        gold_schema   = str(first.get("Gold_schema",   "sap_demo_gold")).strip()
 
         r = PipelineRegistry(
             spark, dbutils,
             pipeline_id    = pipeline_name,
             pipeline_name  = f"SAP Pipeline — {pipeline_name}",
             environment    = environment,
-            target_catalog = CATALOG,
+            target_catalog = TARGET_CATALOG,
             bronze_schema  = bronze_schema,
             silver_schema  = silver_schema,
             gold_schema    = gold_schema,
             config_dir     = CONFIG_DIR,
-            alert_email    = "venkatesh.chandani@applexus.com",
-            notes          = (f"SAP config-table-driven onboarding (multi-source) — "
-                              f"{PIPELINE_TABLE_CONFIG}"
-                              + (f" @ v{config_version}" if config_version is not None else ""))
+            alert_email    = ALERT_EMAIL,
+            notes          = "SAP template-driven onboarding (multi-source)"
         )
 
         for source in group_rows:
-            # FIX (ported from the Excel orchestrator): bind table_name
-            # before anything risky happens, so the except block below
-            # always names the right table even if a later field access
-            # in this iteration raises.
             table_name    = str(source["Table_name"]).strip()
             source_entity = table_name.lower().replace(".", "_")
             source_path   = str(source["Source_path"]).strip()
             metadata_path = str(source["Metadata_path"]).strip()
             silver_name   = str(source["Silver_table"]).strip()
-            load_type     = str(source.get("Load_type") or "full").strip().lower()
+            load_type     = str(source.get("Load_type", "full")).strip().lower()
             merge_keys    = str(source.get("Merge_keys", "")).strip() or None
 
             logger.info("─" * 55)
             logger.info(f"  Table       : {table_name}")
             logger.info(f"  Path        : {source_path}")
-            logger.info(f"  Metadata    : {metadata_path}")
+            if str(source.get("Connection_name", "")).strip().upper() == "SQL_SERVER":
+                logger.info(f"  Metadata    : INFORMATION_SCHEMA.COLUMNS via JDBC "
+                            f"({source.get('Connection_name')})")
+            else:
+                logger.info(f"  Metadata    : {metadata_path}")
             logger.info(f"  Load type   : {load_type}")
             if silver_name:
                 logger.info(f"  Silver      : {silver_name}")
 
             try:
-                # Reuse metadata read during Step 0 — no second file read.
+                # Reuse metadata read during Step 0 — no second read/JDBC call.
                 meta = landed_meta.get((pipeline_name, table_name)) \
-                       or read_sap_metadata(metadata_path)
+                       or _read_metadata_for_source(source)
 
-                # Format: template override if provided, else from metadata
+                # Format: Excel override if provided, else from metadata
                 csv_format  = str(source.get("Format", "")).strip().lower()
                 file_format = csv_format if csv_format else meta["format"]
 
                 # Watermark — auto-detected from .sap.partfile.metadata
                 # (semanticType="_change_mode" + TIMESTAMP -> __timestamp)
-                # template Watermark column overrides if provided
+                # Excel Watermark column overrides if provided
+                # SQL_SERVER: INFORMATION_SCHEMA can't supply a watermark, so it
+                # stays EMPTY unless explicitly provided (future Excel template /
+                # pipeline_table_config.Watermark). That is valid for
+                # load_type=full; incremental types are rejected by add_source().
+                is_sql_server = str(source.get("Connection_name", "")).strip().upper() == "SQL_SERVER"
                 watermark_raw = str(source.get("Watermark", "")).strip()
-                watermark     = watermark_raw if watermark_raw \
-                                else meta.get("watermark", "__timestamp")
+                if watermark_raw:
+                    watermark = watermark_raw                           # explicit override wins
+                elif is_sql_server:
+                    watermark = ""                                      # not derivable
+                else:
+                    watermark = meta.get("watermark") or "__timestamp"  # SAP: unchanged
 
-                # Soft delete — auto-detected; only meaningful for scd2.
-                # FIX (ported from the Excel orchestrator): validate the
-                # template override before trusting it. A bare value like
-                # "D" isn't a SQL condition — using it as one breaks the
-                # DLT apply_as_deletes expression at run time, far removed
-                # from where the typo was actually made.
+                # Soft delete — auto-detected; only meaningful for scd2
                 soft_delete_raw = str(source.get("Soft_delete_condition", "")).strip()
-                if soft_delete_raw and not _looks_like_sql_condition(soft_delete_raw):
-                    logger.warning(
-                        f"  Soft_delete_condition for '{table_name}' looks like a bare "
-                        f"value, not a SQL condition: {soft_delete_raw!r}. Ignoring the "
-                        f"override and using the SAP-metadata-derived condition instead."
-                    )
-                    soft_delete_raw = ""
                 soft_delete = (soft_delete_raw if soft_delete_raw
                                else meta.get("soft_delete_condition")) \
                               if load_type == "scd2" else None
 
                 logger.info(f"  Format      : {file_format}"
                       + (" (override)" if csv_format else " (from metadata)"))
-                logger.info(f"  Watermark   : {watermark}")
+                logger.info(f"  Watermark   : {watermark or '(none)'}")
                 if load_type == "scd2" and soft_delete:
                     logger.info(f"  Soft delete : {soft_delete}")
                 logger.info(f"  Cols        : {len(meta['schema_hints'])}")
@@ -755,7 +872,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                 r.add_source(
                     source_entity,
                     path                   = source_path,
-                    keys                   = merge_keys or meta["key_str"],
+                    keys                   = meta["key_str"],
                     watermark              = watermark,
                     format                 = file_format,
                     schema                 = meta["schema_hints"],
@@ -779,32 +896,27 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                         name        = silver_name,
                         type        = silver_type,
                         from_entity = source_entity,
-                        keys        = merge_keys or meta["key_str"],
+                        keys        = meta["key_str"] or (merge_keys or ""),
                         watermark   = watermark,
                     )
                     if load_type == "scd2" and soft_delete:
                         silver_kwargs["soft_delete"] = soft_delete
                     r.add_silver(**silver_kwargs)
 
-                # Register gold — a MATERIALIZED VIEW, one per source table.
-                # Gold is a 1:1 copy of this row's silver with light
-                # transforms (casts, renames) from Gold_sql_file, or a plain
-                # SELECT * passthrough. Every table reaches gold: if Gold_view
-                # is blank, the table name is used, so the gold object is
-                # {pipeline_name}_{gold_view or table}_gold in Gold_schema.
-                # An MV is refreshed from its query, so there's no
+                # Register gold — a plain VIEW only. No materialized-table
+                # option: every gold object is `CREATE OR REPLACE VIEW`,
+                # re-pointed at current silver on every run, so there's no
                 # load_type/merge_keys/watermark to configure for it.
                 gold_sql_file = str(source.get("Gold_sql_file", "")).strip()
                 gold_view     = str(source.get("Gold_view", "")).strip()
-                join_silvers_raw = str(source.get("Join_Silvers", "")).strip()
-                gold_object   = gold_view or source_entity
+                gold_object   = gold_view
 
                 has_dlt_silver = bool(silver_name) and load_type in (
                     "full", "scd1", "scd2", "delta", "delta_merge")
                 silver_full = None
                 if has_dlt_silver:
                     silver_layer = f"{pipeline_name}_{silver_name}_silver"
-                    silver_full  = f"{CATALOG}.{silver_schema}.{silver_layer}"
+                    silver_full  = f"{TARGET_CATALOG}.{silver_schema}.{silver_layer}"
 
                 # A gold view needs either an explicit SQL file, or can
                 # default to a straight silver passthrough.
@@ -818,50 +930,21 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
 
                 if gold_object:
                     try:
-                        join_sources = []
-
                         if gold_sql_file:
                             sql_path = f"{BASE_VOLUME}/sql_files/{gold_sql_file}"
                             gold_sql = dbutils.fs.head(sql_path, 1_000_000)
-
-                            # FIX (ported from the Excel orchestrator): check
-                            # the placeholder actually exists before
-                            # replacing. If it's missing (typo, wrong case,
-                            # extra space in the .sql file), the gold object
-                            # would otherwise ship with no primary-silver
-                            # reference at all — a query that "works" but
-                            # reads from nowhere.
-                            if silver_full and "{silver_table}" not in gold_sql:
-                                logger.warning(
-                                    f"  '{{silver_table}}' placeholder not found in "
-                                    f"{gold_sql_file} — gold object '{gold_object}' may be "
-                                    f"missing its primary silver reference."
-                                )
+                            # Only THIS row's own silver gets substituted —
+                            # any other silver the SQL joins against must be
+                            # written out fully-qualified, hardcoded, by
+                            # whoever authored the .sql file. Depends_on_silvers
+                            # below is lineage-only; it does not drive any
+                            # substitution.
                             if silver_full:
                                 gold_sql = gold_sql.replace("{silver_table}", silver_full)
                             sql_source_desc = gold_sql_file
-
-                            # FIX (ported from the Excel orchestrator): resolve
-                            # Join_Silvers into an actual join_sources list with
-                            # collision-checked aliases, instead of leaving
-                            # multi-silver joins with no registration path at
-                            # all. Only meaningful alongside a real SQL file —
-                            # a plain passthrough view has nothing to join.
-                            seen_aliases = set()
-                            if join_silvers_raw:
-                                for s in [x.strip() for x in join_silvers_raw.split(",") if x.strip()]:
-                                    alias = s.replace("_", "")[:12]
-                                    if alias in seen_aliases:
-                                        logger.warning(
-                                            f"  Join alias collision for gold '{gold_object}': "
-                                            f"'{alias}' (from '{s}') duplicates an existing "
-                                            f"alias — the SQL will reference the wrong table."
-                                        )
-                                    seen_aliases.add(alias)
-                                    join_sources.append({"entity": s, "type": "silver", "alias": alias})
                         else:
                             # Gold_view with no Gold_sql_file: default silver->gold
-                            # passthrough view. Nothing to join.
+                            # passthrough view.
                             gold_sql = f"SELECT * FROM {silver_full}"
                             sql_source_desc = "default passthrough (SELECT * FROM silver_table)"
 
@@ -879,8 +962,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                             name            = gold_object,
                             sql             = gold_sql,
                             load_type       = "full",
-                            materialization = "materialized_view",
-                            join_sources    = join_sources if join_sources else None,
+                            materialization = "view",
                         )
                         if silver_name and has_dlt_silver:
                             gold_kwargs["from_silver"] = silver_name
@@ -889,9 +971,7 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
                             gold_kwargs["from_bronze"] = source_entity
 
                         r.add_gold(**gold_kwargs)
-                        logger.info(f"  Gold        : {gold_object} (materialized view)")
-                        if join_sources:
-                            logger.info(f"  Joins       : {[j['entity'] for j in join_sources]}")
+                        logger.info(f"  Gold        : {gold_object} (view, load_type=full)")
                         if len(depends_on_list) > 1:
                             logger.info(f"  Depends on  : {depends_on_list}")
                         logger.info(f"  SQL source  : {sql_source_desc}")
@@ -917,26 +997,84 @@ def load_sap_pipeline_from_table(environment: str, pipeline_name: str):
 
     return results
 
+
+# COMMAND ----------
+
+# DBTITLE 1,Environment parameters
+# Every environment-specific value comes from a job parameter
+# (resources/control_jobs.yml), so the same notebook runs in dev, qa and prod:
+#
+#   catalog + control_schema -> CTRL, PIPELINE_TABLE_CONFIG (control tables)
+#                               TARGET_CATALOG (bronze/silver/gold tables)
+#   landing_base_path        -> LANDING_BASE_PATH (Source_path / Metadata_path base;
+#                               also where jdbc_extract_to_landing.py writes)
+#   framework_root           -> BASE_VOLUME (sql_files/) and CONFIG_DIR (configs/)
+#                               default /Volumes/<catalog>/<control_schema>/landing
+#   alert_email              -> ALERT_EMAIL (empty = the registry's default list)
+#
+# These are module-level names read when the functions run, so setting
+# them here (after the %run cells, before the Run cell) is enough.
+
+dbutils.widgets.text("catalog", "", "Catalog")
+dbutils.widgets.text("control_schema", "", "Control schema")
+dbutils.widgets.text("framework_root", "", "Framework root (empty = /Volumes/<catalog>/<control_schema>/landing)")
+dbutils.widgets.text("landing_base_path", "", "Landing base path (source_path is relative to it)")
+dbutils.widgets.text("alert_email", "", "Alert e-mail (empty = registry default)")
+
+_p_catalog        = dbutils.widgets.get("catalog").strip()
+_p_control_schema = dbutils.widgets.get("control_schema").strip()
+_p_framework_root = dbutils.widgets.get("framework_root").strip()
+_p_landing_base   = dbutils.widgets.get("landing_base_path").strip()
+ALERT_EMAIL       = dbutils.widgets.get("alert_email").strip()
+
+_missing = [n for n, v in (("catalog", _p_catalog), ("control_schema", _p_control_schema),
+                           ("landing_base_path", _p_landing_base)) if not v]
+if _missing:
+    raise ValueError(f"Required widget(s) empty: {_missing}. They are job parameters of "
+                     f"Config_file_generator (resources/control_jobs.yml); when running by "
+                     f"hand, fill them in at the top of the notebook.")
+
+TARGET_CATALOG        = _p_catalog
+CTRL                  = f"{_p_catalog}.{_p_control_schema}"
+PIPELINE_TABLE_CONFIG = f"{CTRL}.pipeline_table_config"
+LANDING_BASE_PATH     = _p_landing_base.rstrip("/") + "/"
+BASE_VOLUME           = (_p_framework_root or f"/Volumes/{_p_catalog}/{_p_control_schema}/landing").rstrip("/")
+CONFIG_DIR            = f"{BASE_VOLUME}/configs"
+
+logger.info(f"Parameters -> target catalog : {TARGET_CATALOG}")
+logger.info(f"Parameters -> control tables : {PIPELINE_TABLE_CONFIG}")
+logger.info(f"Parameters -> landing base   : {LANDING_BASE_PATH}")
+logger.info(f"Parameters -> config dir     : {CONFIG_DIR}")
+logger.info(f"Parameters -> sql_files dir  : {BASE_VOLUME}/sql_files")
+logger.info(f"Parameters -> alert e-mail   : {ALERT_EMAIL or '(registry default)'}")
+
+# COMMAND ----------
+
 # ── Run ──────────────────────────────────────────────────────
 # Driven entirely by the environment/pipeline_name widgets — generates a
 # config for exactly this one pipeline, reading its rows from
-# the Delta config table (the Excel template is no longer used anywhere).
+# pipeline_table_config (the Excel template is no longer used anywhere).
+
+# If template_path is set, first load the Excel rows for this pipeline into
+# pipeline_table_config; if empty, skip and use the table as-is (existing flow).
+if TEMPLATE_PATH:
+    load_template_into_pipeline_table_config(spark, TEMPLATE_PATH, PIPELINE_NAME)
+else:
+    logger.info("template_path is empty — using existing rows in pipeline_table_config")
 
 load_sap_pipeline_from_table(ENVIRONMENT, PIPELINE_NAME)
 
-# ── Archive rotation — NOT automatic, must be scheduled separately ────────
-# CORRECTED from a previous version of this comment, which claimed cleanup
-# happened inline on every register() call. It doesn't. pipeline_registry.py
-# writes a new, uniquely-timestamped config file under
-# {CONFIG_DIR}/{pipeline_id}/ on every register(overwrite=True) call above,
-# and never deletes or caps anything itself — nothing here keeps "only the
-# latest + N archived." Old config files accumulate in that folder forever
-# unless purge_old_configs() (also in pipeline_registry.py) is run on its
-# own schedule, e.g. as a separate daily Lakeflow Job:
+# COMMAND ----------
+
+# ── Archive rotation (now automatic, per pipeline, on every register()) ──
+# _rotate_config_files() in pipeline_registry.py already keeps only the
+# latest config in {CONFIG_DIR}/{pipeline_id}/ and caps
+# {CONFIG_DIR}/{pipeline_id}/archive/ at 10 files, immediately after each
+# register() call above — no separate scheduled job needed for that.
 #
-#   purge_old_configs(spark, dbutils, CONFIG_DIR, retention_days=7)
-#
-# It moves config files older than retention_days into a dated archive/
-# subfolder per pipeline, skipping whichever file is currently marked
-# 'current' for that pipeline/environment. If that job isn't scheduled,
-# nothing else in this codebase will do this cleanup for you.
+# purge_old_configs() below is still available as an OPTIONAL extra
+# safety net (e.g. if you want a time-based cap in addition to the
+# count-based one) but is not required for the "only latest + 10
+# archived" behavior — that's now handled inline, per pipeline.
+
+# purge_old_configs(spark, dbutils, CONFIG_DIR, retention_days=7)
