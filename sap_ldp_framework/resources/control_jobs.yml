@@ -68,6 +68,10 @@ resources:
           default: ${var.control_schema}
         - name: landing_base_path
           default: ${var.landing_base_path}
+        - name: framework_root
+          default: ${var.framework_root}
+        - name: alert_email
+          default: ${var.alert_email}
       environments:
         - environment_key: create_config_file_environment
           spec:
@@ -77,11 +81,13 @@ resources:
       tasks:
         - task_key: create_config_file
           notebook_task:
-            notebook_path: ../src/config_generation/metadataloader_updated.py
+            notebook_path: ../src/config_generation/metadata_loader.py
             base_parameters:
               environment: "{{job.parameters.environment}}"
               pipeline_name: "{{job.parameters.pipeline_name}}"
               catalog: "{{job.parameters.catalog}}"
               control_schema: "{{job.parameters.control_schema}}"
               landing_base_path: "{{job.parameters.landing_base_path}}"
+              framework_root: "{{job.parameters.framework_root}}"
+              alert_email: "{{job.parameters.alert_email}}"
           environment_key: create_config_file_environment

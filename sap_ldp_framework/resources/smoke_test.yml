@@ -19,12 +19,12 @@ resources:
           default: ${var.control_schema}
         - name: pipeline_id
           default: ${var.pipeline_id}
-        - name: base_volume
-          default: ${var.base_volume}
-        - name: config_out_dir
-          default: ${var.config_out_dir}
-        - name: dlt_pipeline_uuid
-          default: ${resources.pipelines.sap_lakeflow_pipeline.id}
+        - name: framework_root
+          default: ${var.framework_root}
+        - name: bronze_pipeline_uuid
+          default: ${resources.pipelines.bronze_pipeline.id}
+        - name: silver_pipeline_uuid
+          default: ${resources.pipelines.silver_pipeline.id}
       environments:
         - environment_key: smoke_test_environment
           spec:
